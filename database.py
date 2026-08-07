@@ -159,6 +159,10 @@ async def init_db():
                 INSERT INTO config (key, value) VALUES ('full_block_cost', '50') ON CONFLICT DO NOTHING;
                 INSERT INTO config (key, value) VALUES ('staff_role_id', '0') ON CONFLICT DO NOTHING;
                 INSERT INTO config (key, value) VALUES ('weekly_reset_day', '0') ON CONFLICT DO NOTHING;
+                INSERT INTO config (key, value) VALUES ('weekly_blocks', '7') ON CONFLICT DO NOTHING;
+                INSERT INTO config (key, value) VALUES ('distribution_day', '0') ON CONFLICT DO NOTHING;
+                INSERT INTO config (key, value) VALUES ('distribution_hour', '0') ON CONFLICT DO NOTHING;
+                INSERT INTO config (key, value) VALUES ('last_distribution', '') ON CONFLICT DO NOTHING;
                 """
             )
         finally:
@@ -218,6 +222,10 @@ async def init_db():
                 INSERT OR IGNORE INTO config (key, value) VALUES ('full_block_cost', '50');
                 INSERT OR IGNORE INTO config (key, value) VALUES ('staff_role_id', '0');
                 INSERT OR IGNORE INTO config (key, value) VALUES ('weekly_reset_day', '0');
+                INSERT OR IGNORE INTO config (key, value) VALUES ('weekly_blocks', '7');
+                INSERT OR IGNORE INTO config (key, value) VALUES ('distribution_day', '0');
+                INSERT OR IGNORE INTO config (key, value) VALUES ('distribution_hour', '0');
+                INSERT OR IGNORE INTO config (key, value) VALUES ('last_distribution', '');
                 """
             )
             await db.commit()
@@ -378,6 +386,30 @@ async def get_all_pending_requests() -> list[dict]:
 async def update_request_status(request_id: int, status: str):
     async with DBConnection() as conn:
         await conn.execute("UPDATE claim_requests SET status = ? WHERE id = ?", (status, request_id))
+
+
+async def update_request_chunks(request_id: int, new_chunks: int):
+    """Update the chunks_requested on a request (for partial fills)."""
+    async with DBConnection() as conn:
+        await conn.execute(
+            "UPDATE claim_requests SET chunks_requested = ? WHERE id = ?",
+            (new_chunks, request_id),
+        )
+
+
+async def get_expired_approved_requests(days: int = 7) -> list[dict]:
+    """Get approved requests older than `days` days that were never purchased."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    async with DBConnection() as conn:
+        return await conn.fetchall(
+            "SELECT cr.*, l.name as land_name, l.chunks, l.owner_id "
+            "FROM claim_requests cr "
+            "JOIN lands l ON cr.land_id = l.id "
+            "WHERE cr.status = 'approved' AND cr.requested_at < ? "
+            "ORDER BY cr.requested_at ASC",
+            (cutoff,),
+        )
 
 
 # ── Purchase helpers ──────────────────────────────────────────────────

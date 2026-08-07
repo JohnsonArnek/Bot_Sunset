@@ -65,6 +65,7 @@ EXTENSIONS = [
     "cogs.reserve",
     "cogs.config",
     "cogs.sunset",
+    "cogs.distribution",
 ]
 
 

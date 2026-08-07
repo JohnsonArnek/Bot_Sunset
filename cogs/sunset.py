@@ -58,10 +58,24 @@ class SunsetCog(commands.GroupCog, name="sunset"):
         )
 
         embed.add_field(
+            name="📦 Weekly Distribution (Automated)",
+            value=(
+                "Every week the bot automatically:\n"
+                "1️⃣ Generates new blocks (default: 7)\n"
+                "2️⃣ Tops up reserve if below protected min\n"
+                "3️⃣ Approves top queue requests (partial fills allowed)\n"
+                "4️⃣ Sends leftover blocks to reserve\n"
+                "⏰ Approved requests expire after 7 days if not bought"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
             name="ℹ️ Info",
             value=(
                 "• `/reserve view` — View current reserve blocks and protected minimum.\n"
-                "• `/sunset help` — Show this help message."
+                "• `/sunset help` — Show this help message.\n"
+                "• Config keys: `weekly_blocks`, `distribution_day`, `distribution_hour`"
             ),
             inline=False,
         )

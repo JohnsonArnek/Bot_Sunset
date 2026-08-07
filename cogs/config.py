@@ -14,6 +14,9 @@ VALID_KEYS = {
     "full_block_cost": "Price for the 26+ chunks tier (integer ems)",
     "staff_role_id": "Discord role ID for staff permissions",
     "weekly_reset_day": "Day of week for weekly reset (0=Mon, 6=Sun)",
+    "weekly_blocks": "Blocks generated per weekly distribution (default 7)",
+    "distribution_day": "Day of week for distribution (0=Mon, 6=Sun)",
+    "distribution_hour": "Hour (UTC) for distribution (0-23)",
 }
 
 
