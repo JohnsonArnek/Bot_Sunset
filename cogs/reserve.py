@@ -24,6 +24,8 @@ class ReserveCog(commands.GroupCog, name="reserve"):
 
     @app_commands.command(name="view", description="View the current reserve status")
     async def reserve_view(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
         reserve = await db.get_reserve()
         available = max(0, reserve["total_blocks"] - reserve["protected_min"])
 
@@ -35,15 +37,17 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         embed.add_field(name="Protected (Not For Sale)", value=str(reserve["protected_min"]), inline=True)
         embed.add_field(name="Available For Sale", value=str(available), inline=True)
         embed.set_footer(text="Reserve blocks can be purchased at 1.5× normal price via /claim reserve")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="add", description="[Staff] Add blocks to the reserve pool")
     @app_commands.describe(amount="Number of blocks to add")
     async def reserve_add(self, interaction: discord.Interaction, amount: int):
+        await interaction.response.defer()
+
         if not await _is_staff(interaction):
-            return await interaction.response.send_message("🔒 Staff only.", ephemeral=True)
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
         if amount < 1:
-            return await interaction.response.send_message("❌ Amount must be at least 1.", ephemeral=True)
+            return await interaction.followup.send("❌ Amount must be at least 1.", ephemeral=True)
 
         await db.add_reserve_blocks(amount)
         reserve = await db.get_reserve()
@@ -55,22 +59,24 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         )
         embed.add_field(name="New Total", value=str(reserve["total_blocks"]), inline=True)
         embed.set_footer(text=f"Updated by {interaction.user.display_name}")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="strategic", description="[Staff] Give a reserve block to a land for free")
     @app_commands.describe(land_name="Land to receive the block", reason="Reason for strategic distribution")
     async def strategic(self, interaction: discord.Interaction, land_name: str, reason: str = "Strategic distribution"):
+        await interaction.response.defer()
+
         if not await _is_staff(interaction):
-            return await interaction.response.send_message("🔒 Staff only.", ephemeral=True)
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
 
         land = await db.get_land_by_name(land_name)
         if not land:
-            return await interaction.response.send_message(f"❌ Land **{land_name}** not found.", ephemeral=True)
+            return await interaction.followup.send(f"❌ Land **{land_name}** not found.", ephemeral=True)
 
         reserve = await db.get_reserve()
         available = reserve["total_blocks"] - reserve["protected_min"]
         if available <= 0:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"🚫 No reserve blocks available (protected minimum: {reserve['protected_min']}).",
                 ephemeral=True,
             )
@@ -89,9 +95,8 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         embed.add_field(name="Reserve Remaining", value=str(reserve["total_blocks"] - 1), inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_footer(text=f"Distributed by {interaction.user.display_name}")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ReserveCog(bot))
-

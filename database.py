@@ -38,6 +38,17 @@ def _format_query(query: str) -> str:
     return q
 
 
+# ── Connection Pool ───────────────────────────────────────────────────
+_pool = None
+
+
+async def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    return _pool
+
+
 class DBConnection:
     def __init__(self):
         self.sqlite_conn = None
@@ -45,7 +56,8 @@ class DBConnection:
 
     async def __aenter__(self):
         if IS_POSTGRES:
-            self.pg_conn = await asyncpg.connect(DATABASE_URL)
+            pool = await _get_pool()
+            self.pg_conn = await pool.acquire()
             return self
         else:
             self.sqlite_conn = await aiosqlite.connect(DB_PATH)
@@ -54,7 +66,8 @@ class DBConnection:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.pg_conn:
-            await self.pg_conn.close()
+            pool = await _get_pool()
+            await pool.release(self.pg_conn)
         if self.sqlite_conn:
             await self.sqlite_conn.close()
 

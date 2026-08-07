@@ -17,6 +17,8 @@ class QueueCog(commands.Cog):
 
     @app_commands.command(name="queue", description="View the current claim request queue")
     async def queue(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
         requests = await db.get_all_pending_requests()
 
         if not requests:
@@ -25,7 +27,7 @@ class QueueCog(commands.Cog):
                 description="The queue is empty — no pending requests.",
                 colour=discord.Colour.light_grey(),
             )
-            return await interaction.response.send_message(embed=embed)
+            return await interaction.followup.send(embed=embed)
 
         full_cost = await db.get_full_block_cost()
 
@@ -94,9 +96,8 @@ class QueueCog(commands.Cog):
         else:
             embed.set_footer(text=f"{total} request(s) in queue.")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(QueueCog(bot))
-

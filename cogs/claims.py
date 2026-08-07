@@ -47,23 +47,25 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         purpose: app_commands.Choice[str],
         chunks: int = 1,
     ):
+        await interaction.response.defer()
+
         land = await db.get_land_for_user(interaction.user.id)
         if not land:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ You don't belong to any land. Use `/land create` first.", ephemeral=True
             )
 
         # Check for existing pending request
         existing = await db.get_pending_request(land["id"])
         if existing:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Your land already has a pending claim request. "
                 "Wait for it to be processed or cancel it first.",
                 ephemeral=True,
             )
 
         if chunks < 1:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ You must request at least 1 chunk.", ephemeral=True
             )
 
@@ -82,28 +84,30 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         embed.add_field(name="Request ID", value=f"#{request_id}", inline=True)
         embed.set_footer(text="Use /queue to see your position.")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ── /claim buy ────────────────────────────────────────────────────
 
     @app_commands.command(name="buy", description="Buy your land's weekly normal claim block")
     async def claim_buy(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
         land = await db.get_land_for_user(interaction.user.id)
         if not land:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ You don't belong to any land.", ephemeral=True
             )
 
         # Only the owner can purchase
         if land["owner_id"] != interaction.user.id:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ Only the land owner can purchase claim blocks.", ephemeral=True
             )
 
         # Weekday check (Mon=0 ... Fri=4)
         now = datetime.now(timezone.utc)
         if now.weekday() >= 5:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "🚫 Normal claim blocks can only be purchased **Monday–Friday**. "
                 "Use `/claim reserve` for weekend purchases.",
                 ephemeral=True,
@@ -112,7 +116,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         # Weekly purchase restriction
         existing_purchase = await db.get_normal_purchase_this_week(land["id"])
         if existing_purchase:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Your land has already purchased a normal block this week. "
                 "The limit resets every Monday.",
                 ephemeral=True,
@@ -124,11 +128,11 @@ class ClaimsCog(commands.GroupCog, name="claim"):
             # Check if there is a pending one instead to give a better message
             pending = await db.get_pending_request(land["id"])
             if pending:
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "❌ Your claim request hasn't been approved yet. Staff must approve it first.",
                     ephemeral=True,
                 )
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ You don't have an approved claim request. Use `/claim request` first.",
                 ephemeral=True,
             )
@@ -153,20 +157,22 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         embed.add_field(name="Price Paid", value=f"{price} ems" if price > 0 else "Free", inline=True)
         embed.set_footer(text="Next normal purchase available after Monday reset.")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ── /claim reserve ────────────────────────────────────────────────
 
     @app_commands.command(name="reserve", description="Buy a reserve claim block (1.5× price, bypasses queue)")
     async def claim_reserve(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
         land = await db.get_land_for_user(interaction.user.id)
         if not land:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ You don't belong to any land.", ephemeral=True
             )
 
         if land["owner_id"] != interaction.user.id:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ Only the land owner can purchase claim blocks.", ephemeral=True
             )
 
@@ -174,7 +180,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         reserve = await db.get_reserve()
         available = reserve["total_blocks"] - reserve["protected_min"]
         if available <= 0:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"🚫 No reserve blocks available for sale. "
                 f"({reserve['total_blocks']} in reserve, {reserve['protected_min']} protected)",
                 ephemeral=True,
@@ -205,27 +211,29 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         )
         embed.set_footer(text="Excess emeralds help subsidise smaller lands.")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ── /claim approve ────────────────────────────────────────────────
 
     @app_commands.command(name="approve", description="[Staff] Approve a land's claim request")
     @app_commands.describe(land_name="Name of the land to approve")
     async def claim_approve(self, interaction: discord.Interaction, land_name: str):
+        await interaction.response.defer()
+
         if not await _is_staff(interaction):
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "🔒 Staff only.", ephemeral=True
             )
 
         land = await db.get_land_by_name(land_name)
         if not land:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"❌ Land **{land_name}** not found.", ephemeral=True
             )
 
         pending = await db.get_pending_request(land["id"])
         if not pending:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"❌ **{land_name}** has no pending claim request.", ephemeral=True
             )
 
@@ -244,7 +252,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         embed.add_field(name="Price", value=f"{price} ems" if price > 0 else "Free", inline=True)
         embed.set_footer(text=f"Approved by {interaction.user.display_name}")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
         # Notify the land owner
         try:
@@ -267,20 +275,22 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         land_name: str,
         reason: str = "No reason given.",
     ):
+        await interaction.response.defer()
+
         if not await _is_staff(interaction):
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "🔒 Staff only.", ephemeral=True
             )
 
         land = await db.get_land_by_name(land_name)
         if not land:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"❌ Land **{land_name}** not found.", ephemeral=True
             )
 
         pending = await db.get_pending_request(land["id"])
         if not pending:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"❌ **{land_name}** has no pending claim request.", ephemeral=True
             )
 
@@ -294,7 +304,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_footer(text=f"Denied by {interaction.user.display_name}")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
         # Notify the land owner
         try:
