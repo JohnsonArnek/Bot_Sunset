@@ -90,7 +90,8 @@ class DBConnection:
 async def init_db():
     """Create all tables if they don't exist. Called once on bot startup."""
     if IS_POSTGRES:
-        async with asyncpg.connect(DATABASE_URL) as conn:
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS lands (
@@ -147,6 +148,8 @@ async def init_db():
                 INSERT INTO config (key, value) VALUES ('weekly_reset_day', '0') ON CONFLICT DO NOTHING;
                 """
             )
+        finally:
+            await conn.close()
     else:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.executescript(
