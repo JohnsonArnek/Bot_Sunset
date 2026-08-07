@@ -303,6 +303,12 @@ async def get_land_for_user(user_id: int) -> dict | None:
         )
 
 
+async def get_all_lands() -> list[dict]:
+    """Get all registered lands ordered by name."""
+    async with DBConnection() as conn:
+        return await conn.fetchall("SELECT * FROM lands ORDER BY name ASC")
+
+
 # ── Member helpers ────────────────────────────────────────────────────
 
 async def add_member(land_id: int, user_id: int):

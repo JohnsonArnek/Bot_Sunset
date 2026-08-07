@@ -160,6 +160,41 @@ class LandCog(commands.GroupCog, name="land"):
         embed.set_footer(text=f"Updated by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="list", description="List all registered lands")
+    async def land_list(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        lands = await db.get_all_lands()
+        if not lands:
+            embed = discord.Embed(
+                title="🏰 Registered Lands",
+                description="No lands registered yet.",
+                colour=discord.Colour.light_grey(),
+            )
+            return await interaction.followup.send(embed=embed)
+
+        embed = discord.Embed(
+            title="🏰 Registered Lands",
+            description=f"Total Lands: **{len(lands)}**",
+            colour=discord.Colour.teal(),
+        )
+
+        for land in lands[:25]:  # Discord embed limit
+            member_count = await db.get_member_count(land["id"])
+            embed.add_field(
+                name=f"🏰 {land['name']}",
+                value=(
+                    f"👑 **Owner:** <@{land['owner_id']}>\n"
+                    f"📊 **Chunks:** {land['chunks']}  •  👥 **Members:** {member_count}"
+                ),
+                inline=False,
+            )
+
+        if len(lands) > 25:
+            embed.set_footer(text=f"Showing top 25 of {len(lands)} lands.")
+
+        await interaction.followup.send(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LandCog(bot))
