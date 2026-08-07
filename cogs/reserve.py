@@ -46,18 +46,26 @@ class ReserveCog(commands.GroupCog, name="reserve"):
 
         if not await _is_staff(interaction):
             return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
-        if amount < 1:
-            return await interaction.followup.send("❌ Amount must be at least 1.", ephemeral=True)
+        if amount == 0:
+            return await interaction.followup.send("❌ Amount cannot be 0.", ephemeral=True)
+
+        reserve = await db.get_reserve()
+        if reserve["total_blocks"] + amount < 0:
+            return await interaction.followup.send(
+                f"❌ Cannot remove {abs(amount)} blocks — current reserve is only {reserve['total_blocks']}.",
+                ephemeral=True,
+            )
 
         await db.add_reserve_blocks(amount)
-        reserve = await db.get_reserve()
+        new_reserve = await db.get_reserve()
 
+        action_str = f"Added **{amount}** block(s) to" if amount > 0 else f"Removed **{abs(amount)}** block(s) from"
         embed = discord.Embed(
             title="✅ Reserve Updated",
-            colour=discord.Colour.green(),
-            description=f"Added **{amount}** block(s) to the reserve.",
+            colour=discord.Colour.green() if amount > 0 else discord.Colour.orange(),
+            description=f"{action_str} the reserve.",
         )
-        embed.add_field(name="New Total", value=str(reserve["total_blocks"]), inline=True)
+        embed.add_field(name="New Total", value=str(new_reserve["total_blocks"]), inline=True)
         embed.set_footer(text=f"Updated by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
