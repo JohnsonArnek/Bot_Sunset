@@ -14,6 +14,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import database
