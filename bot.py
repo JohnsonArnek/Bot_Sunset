@@ -84,22 +84,18 @@ async def load_extensions():
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    
-    # Clear stale per-guild command overrides to resolve duplicate commands
+
+    # Sync commands PER-GUILD (instant) instead of global (up to 1 hr delay)
     for guild in bot.guilds:
         try:
+            # Clear any stale guild-specific overrides first
             bot.tree.clear_commands(guild=guild)
+            # Copy the global command tree into this guild and sync
+            bot.tree.copy_global_to(guild=guild)
             await bot.tree.sync(guild=guild)
-            log.info(f"Cleared guild-local command overrides for {guild.name}")
+            log.info(f"Synced commands to {guild.name} ({guild.id})")
         except Exception as e:
-            log.warning(f"Could not clear guild commands for {guild.name}: {e}")
-
-    # Sync clean global slash commands
-    try:
-        synced_global = await bot.tree.sync()
-        log.info(f"Synced {len(synced_global)} global command(s) cleanly across all servers")
-    except Exception as e:
-        log.error(f"Failed to sync global commands: {e}")
+            log.warning(f"Could not sync commands for {guild.name}: {e}")
 
     log.info(f"Ready! Serving {len(bot.guilds)} guild(s).")
 
