@@ -78,38 +78,41 @@ async def load_extensions():
             log.error(f"Failed to load extension {ext}: {e}")
 
 
-# ── Events ────────────────────────────────────────────────────────────
+# ── Events & Error Handling ───────────────────────────────────────────
 
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    # Sync global slash commands
+    
+    # Clear stale per-guild command overrides to resolve duplicate commands
+    for guild in bot.guilds:
+        try:
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)
+            log.info(f"Cleared guild-local command overrides for {guild.name}")
+        except Exception as e:
+            log.warning(f"Could not clear guild commands for {guild.name}: {e}")
+
+    # Sync clean global slash commands
     try:
         synced_global = await bot.tree.sync()
-        log.info(f"Synced {len(synced_global)} global command(s)")
+        log.info(f"Synced {len(synced_global)} global command(s) cleanly across all servers")
     except Exception as e:
         log.error(f"Failed to sync global commands: {e}")
 
-    # Sync slash commands per-guild for instant availability
-    for guild in bot.guilds:
-        try:
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            log.info(f"Synced {len(synced)} command(s) to guild: {guild.name} ({guild.id})")
-        except Exception as e:
-            log.error(f"Failed to sync to {guild.name}: {e}")
     log.info(f"Ready! Serving {len(bot.guilds)} guild(s).")
 
 
-@bot.event
-async def on_guild_join(guild: discord.Guild):
-    log.info(f"Joined new server: {guild.name} ({guild.id})")
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    log.error(f"App command error in /{interaction.command.name if interaction.command else 'unknown'}: {error}", exc_info=error)
     try:
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        log.info(f"Synced {len(synced)} command(s) to new guild: {guild.name} ({guild.id})")
-    except Exception as e:
-        log.error(f"Failed to sync commands to new guild {guild.name}: {e}")
+        if interaction.response.is_done():
+            await interaction.followup.send(f"❌ An error occurred: `{error}`", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ An error occurred: `{error}`", ephemeral=True)
+    except Exception:
+        pass
 
 
 # ── Web Server for Health Checks ──────────────────────────────────────
