@@ -138,17 +138,26 @@ class LandCog(commands.GroupCog, name="land"):
 
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="member_add", description="Add a member to your land")
-    @app_commands.describe(user="The user to add")
+    @app_commands.command(name="member_add", description="Add a member to a land (Staff can specify land_name)")
+    @app_commands.describe(user="The user to add", land_name="Target land name (Staff only; default: your land)")
     @app_commands.guild_only()
-    async def member_add(self, interaction: discord.Interaction, user: discord.Member):
+    async def member_add(self, interaction: discord.Interaction, user: discord.Member, land_name: str = None):
         await interaction.response.defer()
 
-        land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
-        if not land:
-            return await interaction.followup.send("❌ You must be a land owner on this server.", ephemeral=True)
-        if user.id == interaction.user.id:
-            return await interaction.followup.send("❌ You're already the owner.", ephemeral=True)
+        if land_name:
+            if not await _is_staff(interaction):
+                return await interaction.followup.send("🔒 Only staff can specify a land_name for other lands.", ephemeral=True)
+            land = await db.get_land_by_name(interaction.guild_id, land_name)
+            if not land:
+                return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+        else:
+            land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
+            if not land:
+                return await interaction.followup.send("❌ You must be a land owner on this server (or specify land_name if Staff).", ephemeral=True)
+
+        if user.id == land["owner_id"]:
+            return await interaction.followup.send(f"❌ {user.mention} is already the owner of **{land['name']}**.", ephemeral=True)
+
         existing = await db.get_land_for_user(interaction.guild_id, user.id)
         if existing:
             return await interaction.followup.send(
@@ -162,15 +171,23 @@ class LandCog(commands.GroupCog, name="land"):
         embed.set_footer(text="+2 queue score per member")
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="member_remove", description="Remove a member from your land")
-    @app_commands.describe(user="The user to remove")
+    @app_commands.command(name="member_remove", description="Remove a member from a land (Staff can specify land_name)")
+    @app_commands.describe(user="The user to remove", land_name="Target land name (Staff only; default: your land)")
     @app_commands.guild_only()
-    async def member_remove(self, interaction: discord.Interaction, user: discord.Member):
+    async def member_remove(self, interaction: discord.Interaction, user: discord.Member, land_name: str = None):
         await interaction.response.defer()
 
-        land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
-        if not land:
-            return await interaction.followup.send("❌ You must be a land owner on this server.", ephemeral=True)
+        if land_name:
+            if not await _is_staff(interaction):
+                return await interaction.followup.send("🔒 Only staff can specify a land_name for other lands.", ephemeral=True)
+            land = await db.get_land_by_name(interaction.guild_id, land_name)
+            if not land:
+                return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+        else:
+            land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
+            if not land:
+                return await interaction.followup.send("❌ You must be a land owner on this server (or specify land_name if Staff).", ephemeral=True)
+
         removed = await db.remove_member(land["id"], user.id)
         if not removed:
             return await interaction.followup.send(
