@@ -115,6 +115,53 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         embed.set_footer(text=f"Distributed by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="leftover_set", description="[Staff] Set the exact number of blocks in the Leftover Pool")
+    @app_commands.describe(amount="New leftover block count")
+    @app_commands.guild_only()
+    async def leftover_set(self, interaction: discord.Interaction, amount: int):
+        await interaction.response.defer()
+
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+        if amount < 0:
+            return await interaction.followup.send("❌ Leftover blocks cannot be negative.", ephemeral=True)
+
+        await db.update_leftover_blocks(interaction.guild_id, amount)
+
+        embed = discord.Embed(
+            title="🛒 Leftover Pool Updated",
+            colour=discord.Colour.green(),
+            description=f"Set Leftover Pool to **{amount}** block(s).",
+        )
+        embed.set_footer(text=f"Updated by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="leftover_add", description="[Staff] Add or remove blocks from the Leftover Pool")
+    @app_commands.describe(amount="Amount to add (use negative number to remove, e.g. 2 or -1)")
+    @app_commands.guild_only()
+    async def leftover_add(self, interaction: discord.Interaction, amount: int):
+        await interaction.response.defer()
+
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        reserve = await db.get_reserve(interaction.guild_id)
+        current = reserve.get("leftover_blocks", 0)
+        new_total = max(0, current + amount)
+
+        await db.update_leftover_blocks(interaction.guild_id, new_total)
+
+        change_str = f"+{amount}" if amount > 0 else str(amount)
+        embed = discord.Embed(
+            title="🛒 Leftover Pool Adjusted",
+            colour=discord.Colour.green() if amount > 0 else discord.Colour.orange(),
+        )
+        embed.add_field(name="Adjustment", value=change_str, inline=True)
+        embed.add_field(name="Old Leftovers", value=str(current), inline=True)
+        embed.add_field(name="New Leftovers", value=str(new_total), inline=True)
+        embed.set_footer(text=f"Adjusted by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ReserveCog(bot))
