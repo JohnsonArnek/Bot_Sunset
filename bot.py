@@ -83,7 +83,14 @@ async def load_extensions():
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    # Sync slash commands to every guild the bot is in (instant availability)
+    # Sync global slash commands
+    try:
+        synced_global = await bot.tree.sync()
+        log.info(f"Synced {len(synced_global)} global command(s)")
+    except Exception as e:
+        log.error(f"Failed to sync global commands: {e}")
+
+    # Sync slash commands per-guild for instant availability
     for guild in bot.guilds:
         try:
             bot.tree.copy_global_to(guild=guild)
@@ -92,6 +99,17 @@ async def on_ready():
         except Exception as e:
             log.error(f"Failed to sync to {guild.name}: {e}")
     log.info(f"Ready! Serving {len(bot.guilds)} guild(s).")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    log.info(f"Joined new server: {guild.name} ({guild.id})")
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        log.info(f"Synced {len(synced)} command(s) to new guild: {guild.name} ({guild.id})")
+    except Exception as e:
+        log.error(f"Failed to sync commands to new guild {guild.name}: {e}")
 
 
 # ── Web Server for Health Checks ──────────────────────────────────────
