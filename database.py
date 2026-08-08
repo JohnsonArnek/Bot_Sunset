@@ -22,6 +22,9 @@ DEFAULT_CONFIG = {
     "distribution_day": "0",
     "distribution_hour": "0",
     "last_distribution": "",
+    "max_queue_chunks": "1",
+    "reserve_mode": "topup",
+    "weekly_reserve_blocks": "2",
 }
 
 
@@ -154,7 +157,8 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS reserve (
                     guild_id       BIGINT PRIMARY KEY,
                     total_blocks   INTEGER NOT NULL DEFAULT 0,
-                    protected_min  INTEGER NOT NULL DEFAULT 3
+                    protected_min  INTEGER NOT NULL DEFAULT 3,
+                    leftover_blocks INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS config (
@@ -166,6 +170,7 @@ async def init_db():
 
                 -- Migrations for existing databases
                 ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0;
+                ALTER TABLE reserve ADD COLUMN IF NOT EXISTS leftover_blocks INTEGER DEFAULT 0;
                 """
             )
         finally:
@@ -210,7 +215,8 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS reserve (
                     guild_id       INTEGER PRIMARY KEY,
                     total_blocks   INTEGER NOT NULL DEFAULT 0,
-                    protected_min  INTEGER NOT NULL DEFAULT 3
+                    protected_min  INTEGER NOT NULL DEFAULT 3,
+                    leftover_blocks INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS config (
@@ -222,10 +228,14 @@ async def init_db():
                 """
             )
             # Soft migrations
-            try:
-                await db.execute("ALTER TABLE lands ADD COLUMN guild_id INTEGER DEFAULT 0")
-            except Exception:
-                pass
+            for migration in [
+                "ALTER TABLE lands ADD COLUMN guild_id INTEGER DEFAULT 0",
+                "ALTER TABLE reserve ADD COLUMN leftover_blocks INTEGER DEFAULT 0",
+            ]:
+                try:
+                    await db.execute(migration)
+                except Exception:
+                    pass
             await db.commit()
 
 
@@ -326,6 +336,12 @@ async def get_all_lands(guild_id: int) -> list[dict]:
             "SELECT * FROM lands WHERE guild_id = ? ORDER BY name ASC",
             (guild_id,),
         )
+
+
+async def delete_land(land_id: int):
+    """Delete a land by ID (cascades to members, requests, purchases)."""
+    async with DBConnection() as conn:
+        await conn.execute("DELETE FROM lands WHERE id = ?", (land_id,))
 
 
 # ── Member helpers ────────────────────────────────────────────────────
@@ -469,13 +485,13 @@ async def get_reserve(guild_id: int) -> dict:
         if not row:
             if IS_POSTGRES:
                 await conn.execute(
-                    "INSERT INTO reserve (guild_id, total_blocks, protected_min) VALUES (?, 0, 3) "
+                    "INSERT INTO reserve (guild_id, total_blocks, protected_min, leftover_blocks) VALUES (?, 0, 3, 0) "
                     "ON CONFLICT (guild_id) DO NOTHING",
                     (guild_id,),
                 )
             else:
                 await conn.execute(
-                    "INSERT OR IGNORE INTO reserve (guild_id, total_blocks, protected_min) VALUES (?, 0, 3)",
+                    "INSERT OR IGNORE INTO reserve (guild_id, total_blocks, protected_min, leftover_blocks) VALUES (?, 0, 3, 0)",
                     (guild_id,),
                 )
             row = await conn.fetchone("SELECT * FROM reserve WHERE guild_id = ?", (guild_id,))
@@ -496,5 +512,23 @@ async def add_reserve_blocks(guild_id: int, amount: int):
         await get_reserve(guild_id)
         await conn.execute(
             "UPDATE reserve SET total_blocks = total_blocks + ? WHERE guild_id = ?",
+            (amount, guild_id),
+        )
+
+
+async def update_leftover_blocks(guild_id: int, new_total: int):
+    async with DBConnection() as conn:
+        await get_reserve(guild_id)
+        await conn.execute(
+            "UPDATE reserve SET leftover_blocks = ? WHERE guild_id = ?",
+            (new_total, guild_id),
+        )
+
+
+async def add_leftover_blocks(guild_id: int, amount: int):
+    async with DBConnection() as conn:
+        await get_reserve(guild_id)
+        await conn.execute(
+            "UPDATE reserve SET leftover_blocks = leftover_blocks + ? WHERE guild_id = ?",
             (amount, guild_id),
         )

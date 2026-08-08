@@ -17,6 +17,9 @@ VALID_KEYS = {
     "weekly_blocks": "Blocks generated per weekly distribution (default 7)",
     "distribution_day": "Day of week for distribution (0=Mon, 6=Sun)",
     "distribution_hour": "Hour (UTC) for distribution (0-23)",
+    "max_queue_chunks": "Max chunks a land can request per queue submission (default 1)",
+    "reserve_mode": "Reserve policy mode: 'topup' or 'fixed' (default topup)",
+    "weekly_reserve_blocks": "Fixed blocks allocated to reserve in fixed mode (default 2)",
 }
 
 

@@ -202,6 +202,28 @@ class LandCog(commands.GroupCog, name="land"):
         embed.set_footer(text=f"Updated by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="delete", description="[Staff] Delete a registered land")
+    @app_commands.describe(land_name="Name of the land to delete")
+    @app_commands.guild_only()
+    async def land_delete(self, interaction: discord.Interaction, land_name: str):
+        await interaction.response.defer()
+
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        land = await db.get_land_by_name(interaction.guild_id, land_name)
+        if not land:
+            return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+
+        await db.delete_land(land["id"])
+
+        embed = discord.Embed(title="🗑️ Land Deleted", colour=discord.Colour.red())
+        embed.add_field(name="Name", value=land["name"], inline=True)
+        embed.add_field(name="Owner", value=f"<@{land['owner_id']}>", inline=True)
+        embed.add_field(name="Chunks Had", value=str(land["chunks"]), inline=True)
+        embed.set_footer(text=f"Deleted by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LandCog(bot))

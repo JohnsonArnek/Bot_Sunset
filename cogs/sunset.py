@@ -25,6 +25,7 @@ class SunsetCog(commands.GroupCog, name="sunset"):
             name="🏰 Land Commands",
             value=(
                 "• `/land create <name> <owner> [chunks]` — [Staff] Create a new land.\n"
+                "• `/land delete <name>` — [Staff] Delete a registered land.\n"
                 "• `/land info [name]` — View detailed info, price tier, queue position.\n"
                 "• `/land list` — List all registered lands, their owners, chunks, and members.\n"
                 "• `/land member_add <user>` — Add a member to your land (+2 queue points).\n"
@@ -38,6 +39,7 @@ class SunsetCog(commands.GroupCog, name="sunset"):
             value=(
                 "• `/claim request <purpose> [chunks]` — Submit a claim block request to the queue.\n"
                 "• `/claim buy` — Buy your weekly normal claim block (Mon–Fri only, 1/week).\n"
+                "• `/claim buy_leftover` — Buy a block from the Leftover Pool at normal price.\n"
                 "• `/claim reserve` — Buy a reserve block at 1.5× price (bypasses queue).\n"
                 "• `/queue` — View the current ranked queue (highest points first)."
             ),
@@ -50,7 +52,7 @@ class SunsetCog(commands.GroupCog, name="sunset"):
                 "• `/land set_chunks <land_name> <chunks>` — Set a land's chunk count manually.\n"
                 "• `/claim approve <land>` — Approve a pending claim request.\n"
                 "• `/claim deny <land> [reason]` — Deny a request and notify the owner.\n"
-                "• `/reserve add <amount>` — Add blocks to the reserve pool.\n"
+                "• `/reserve add <amount>` — Add/remove blocks from the reserve pool.\n"
                 "• `/reserve strategic <land> [reason]` — Free reserve block for strategic use.\n"
                 "• `/config list` — List all current config settings.\n"
                 "• `/config set <key> <value>` — Modify a config setting."
@@ -62,10 +64,11 @@ class SunsetCog(commands.GroupCog, name="sunset"):
             name="📦 Weekly Distribution (Automated)",
             value=(
                 "Every week the bot automatically:\n"
-                "1️⃣ Generates new blocks (default: 7)\n"
-                "2️⃣ Tops up reserve if below protected min\n"
-                "3️⃣ Approves top queue requests (partial fills allowed)\n"
-                "4️⃣ Sends leftover blocks to reserve\n"
+                "1️⃣ Moves previous week's unbought leftovers → Reserve Pool\n"
+                "2️⃣ Generates new blocks (default: 7)\n"
+                "3️⃣ Allocates Reserve (`topup` or `fixed` mode)\n"
+                "4️⃣ Approves top queue requests (partial fills allowed)\n"
+                "5️⃣ Sends remaining blocks → Leftover Pool (normal price for 1 week)\n"
                 "⏰ Approved requests expire after 7 days if not bought"
             ),
             inline=False,
@@ -74,9 +77,9 @@ class SunsetCog(commands.GroupCog, name="sunset"):
         embed.add_field(
             name="ℹ️ Info",
             value=(
-                "• `/reserve view` — View current reserve blocks and protected minimum.\n"
+                "• `/reserve view` — View Leftover Pool & Reserve status.\n"
                 "• `/sunset help` — Show this help message.\n"
-                "• Config keys: `weekly_blocks`, `distribution_day`, `distribution_hour`"
+                "• Config keys: `weekly_blocks`, `max_queue_chunks`, `reserve_mode`, `weekly_reserve_blocks`"
             ),
             inline=False,
         )

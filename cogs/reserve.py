@@ -32,13 +32,14 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         available = max(0, reserve["total_blocks"] - reserve["protected_min"])
 
         embed = discord.Embed(
-            title="🔒 Reserve Status",
+            title="🔒 Reserve & Leftover Pool Status",
             colour=discord.Colour.dark_purple(),
         )
-        embed.add_field(name="Total Blocks", value=str(reserve["total_blocks"]), inline=True)
-        embed.add_field(name="Protected (Not For Sale)", value=str(reserve["protected_min"]), inline=True)
-        embed.add_field(name="Available For Sale", value=str(available), inline=True)
-        embed.set_footer(text="Reserve blocks can be purchased at 1.5× normal price via /claim reserve")
+        embed.add_field(name="🛒 Leftover Pool (Normal Price)", value=f"{reserve.get('leftover_blocks', 0)} block(s)", inline=False)
+        embed.add_field(name="🔒 Reserve Total (1.5× Price)", value=str(reserve["total_blocks"]), inline=True)
+        embed.add_field(name="🛡️ Protected (Not For Sale)", value=str(reserve["protected_min"]), inline=True)
+        embed.add_field(name="💰 Reserve For Sale", value=str(available), inline=True)
+        embed.set_footer(text="Buy leftovers via /claim buy_leftover (normal price) or reserve via /claim reserve (1.5× price)")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="add", description="[Staff] Add or remove blocks from the reserve pool")

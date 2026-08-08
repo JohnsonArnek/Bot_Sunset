@@ -70,6 +70,13 @@ class ClaimsCog(commands.GroupCog, name="claim"):
                 "❌ You must request at least 1 chunk.", ephemeral=True
             )
 
+        max_chunks = int(await db.get_config(interaction.guild_id, "max_queue_chunks") or "1")
+        if chunks > max_chunks:
+            return await interaction.followup.send(
+                f"❌ You can only request up to **{max_chunks}** chunk(s) per submission on this server.",
+                ephemeral=True,
+            )
+
         request_id = await db.create_claim_request(land["id"], chunks, purpose.value)
         full_cost = await db.get_full_block_cost(interaction.guild_id)
         price = models.block_price(land["chunks"], full_cost)
@@ -212,6 +219,53 @@ class ClaimsCog(commands.GroupCog, name="claim"):
             inline=True,
         )
         embed.set_footer(text="Excess emeralds help subsidise smaller lands.")
+
+        await interaction.followup.send(embed=embed)
+
+    # ── /claim buy_leftover ───────────────────────────────────────────
+
+    @app_commands.command(name="buy_leftover", description="Buy a block from the Leftover Pool at normal price")
+    @app_commands.guild_only()
+    async def claim_buy_leftover(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        land = await db.get_land_for_user(interaction.guild_id, interaction.user.id)
+        if not land:
+            return await interaction.followup.send(
+                "❌ You don't belong to any land on this server.", ephemeral=True
+            )
+
+        if land["owner_id"] != interaction.user.id:
+            return await interaction.followup.send(
+                "❌ Only the land owner can purchase claim blocks.", ephemeral=True
+            )
+
+        reserve = await db.get_reserve(interaction.guild_id)
+        leftovers = reserve.get("leftover_blocks", 0)
+        if leftovers <= 0:
+            return await interaction.followup.send(
+                "🚫 No blocks currently available in the Leftover Pool.",
+                ephemeral=True,
+            )
+
+        full_cost = await db.get_full_block_cost(interaction.guild_id)
+        price = models.block_price(land["chunks"], full_cost)
+
+        new_chunks = land["chunks"] + 1
+        await db.update_land_chunks(land["id"], new_chunks)
+        await db.add_leftover_blocks(interaction.guild_id, -1)
+        await db.record_purchase(land["id"], "leftover", price)
+
+        embed = discord.Embed(
+            title="🛒 Leftover Block Purchased",
+            colour=discord.Colour.green(),
+            description="Purchased from the Leftover Pool at normal tier price.",
+        )
+        embed.add_field(name="Land", value=land["name"], inline=True)
+        embed.add_field(name="Total Chunks", value=str(new_chunks), inline=True)
+        embed.add_field(name="Price Paid", value=f"{price} ems" if price > 0 else "Free", inline=True)
+        embed.add_field(name="Leftover Pool Remaining", value=str(leftovers - 1), inline=True)
+        embed.set_footer(text="Unbought leftover blocks move to Reserve at next weekly distribution.")
 
         await interaction.followup.send(embed=embed)
 

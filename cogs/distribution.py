@@ -83,33 +83,52 @@ class DistributionCog(commands.Cog):
         guild_id = guild.id
         log.info(f"=== Starting weekly distribution for guild: {guild.name} ({guild_id}) ===")
 
-        # Step 0: Expire old approved requests (older than 7 days)
+        # Step 0: Move unbought leftover blocks from previous week into the Reserve Pool!
+        reserve = await db.get_reserve(guild_id)
+        old_leftovers = reserve.get("leftover_blocks", 0)
+        if old_leftovers > 0:
+            await db.add_reserve_blocks(guild_id, old_leftovers)
+            await db.update_leftover_blocks(guild_id, 0)
+            log.info(f"[{guild.name}] Moved {old_leftovers} unbought leftover blocks to Reserve")
+
+        # Step 1: Expire old approved requests (older than 7 days)
         expired_count = await self._expire_old_approvals(guild)
 
-        # Step 1: Generate blocks
+        # Step 2: Generate weekly blocks
         weekly_blocks = int(await db.get_config(guild_id, "weekly_blocks") or "7")
         remaining = weekly_blocks
 
-        # Step 2: Top up reserve if below protected minimum
-        reserve = await db.get_reserve(guild_id)
-        protected_min = reserve["protected_min"]
-        current_reserve = reserve["total_blocks"]
+        # Step 3: Handle reserve allocation mode (topup vs fixed)
+        reserve_mode = await db.get_config(guild_id, "reserve_mode") or "topup"
+        reserve_allocated = 0
 
-        if current_reserve < protected_min:
-            needed = protected_min - current_reserve
-            top_up = min(needed, remaining)
-            await db.add_reserve_blocks(guild_id, top_up)
-            remaining -= top_up
-            log.info(f"[{guild.name}] Topped up reserve: +{top_up} blocks")
+        if reserve_mode.lower() == "fixed":
+            fixed_amount = int(await db.get_config(guild_id, "weekly_reserve_blocks") or "2")
+            allocation = min(fixed_amount, remaining)
+            await db.add_reserve_blocks(guild_id, allocation)
+            remaining -= allocation
+            reserve_allocated = allocation
+            log.info(f"[{guild.name}] Fixed reserve allocation: +{allocation} blocks")
+        else:
+            # "topup" mode
+            protected_min = reserve["protected_min"]
+            current_reserve = reserve["total_blocks"] + old_leftovers
+            if current_reserve < protected_min:
+                needed = protected_min - current_reserve
+                top_up = min(needed, remaining)
+                await db.add_reserve_blocks(guild_id, top_up)
+                remaining -= top_up
+                reserve_allocated = top_up
+                log.info(f"[{guild.name}] Topped up reserve: +{top_up} blocks")
 
-        # Step 3: Process the queue
+        # Step 4: Process the queue
         approved_count, partial_count = await self._process_queue(guild, remaining)
         remaining_after_queue = remaining - approved_count
 
-        # Step 4: Leftover → reserve
+        # Step 5: Deposit remaining unused generated blocks into Leftover Pool (NOT reserve)!
         if remaining_after_queue > 0:
-            await db.add_reserve_blocks(guild_id, remaining_after_queue)
-            log.info(f"[{guild.name}] Added {remaining_after_queue} leftover blocks to reserve")
+            await db.add_leftover_blocks(guild_id, remaining_after_queue)
+            log.info(f"[{guild.name}] Deposited {remaining_after_queue} blocks into Leftover Pool")
 
         # Mark this distribution as complete for this guild
         now = datetime.now(timezone.utc).isoformat()
@@ -117,12 +136,13 @@ class DistributionCog(commands.Cog):
 
         log.info(
             f"=== [{guild.name}] Distribution complete: {weekly_blocks} generated, "
-            f"{expired_count} expired, {approved_count} approved blocks used, "
-            f"{partial_count} partial fills, {remaining_after_queue} → reserve ==="
+            f"{old_leftovers} old leftovers → reserve, {expired_count} expired, "
+            f"{approved_count} approved blocks used, {partial_count} partial fills, "
+            f"{remaining_after_queue} → leftover pool ==="
         )
 
         # Post summary to the guild
-        await self._post_summary(guild, weekly_blocks, expired_count, approved_count, partial_count, remaining_after_queue)
+        await self._post_summary(guild, weekly_blocks, old_leftovers, expired_count, approved_count, partial_count, remaining_after_queue)
 
     # ── Expire old approvals ──────────────────────────────────────────
 
@@ -222,7 +242,7 @@ class DistributionCog(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             log.warning(f"Could not DM user {owner_id}")
 
-    async def _post_summary(self, guild: discord.Guild, generated: int, expired: int, approved: int, partial: int, to_reserve: int):
+    async def _post_summary(self, guild: discord.Guild, generated: int, old_leftovers: int, expired: int, approved: int, partial: int, to_leftover: int):
         reserve = await db.get_reserve(guild.id)
 
         embed = discord.Embed(
@@ -234,8 +254,10 @@ class DistributionCog(commands.Cog):
         embed.add_field(name="✅ Queue Approved", value=f"{approved} block(s)", inline=True)
         embed.add_field(name="⚠️ Partial Fills", value=str(partial), inline=True)
         embed.add_field(name="⏰ Expired Approvals", value=str(expired), inline=True)
-        embed.add_field(name="📥 Added to Reserve", value=str(to_reserve), inline=True)
-        embed.add_field(name="🔒 Reserve Total", value=str(reserve["total_blocks"]), inline=True)
+        embed.add_field(name="🛒 Leftover Pool (Normal Price)", value=f"{reserve.get('leftover_blocks', 0)} block(s)", inline=True)
+        embed.add_field(name="🔒 Reserve Total (1.5× Price)", value=f"{reserve['total_blocks']} block(s)", inline=True)
+        if old_leftovers > 0:
+            embed.add_field(name="🔄 Old Leftovers → Reserve", value=f"{old_leftovers} block(s)", inline=False)
         embed.set_footer(text=f"Automated weekly distribution for {guild.name}")
 
         for channel in guild.text_channels:
