@@ -65,41 +65,27 @@ async def _get_pool():
         _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     return _pool
 
-
-import asyncio
-
-_db_lock = asyncio.Lock()
-
-
 class DBConnection:
     def __init__(self):
         self.sqlite_conn = None
         self.pg_conn = None
 
     async def __aenter__(self):
-        await _db_lock.acquire()
-        try:
-            if IS_POSTGRES:
-                pool = await _get_pool()
-                self.pg_conn = await pool.acquire()
-                return self
-            else:
-                self.sqlite_conn = await aiosqlite.connect(DB_PATH)
-                self.sqlite_conn.row_factory = aiosqlite.Row
-                return self
-        except Exception:
-            _db_lock.release()
-            raise
+        if IS_POSTGRES:
+            pool = await _get_pool()
+            self.pg_conn = await pool.acquire()
+            return self
+        else:
+            self.sqlite_conn = await aiosqlite.connect(DB_PATH)
+            self.sqlite_conn.row_factory = aiosqlite.Row
+            return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        try:
-            if self.pg_conn:
-                pool = await _get_pool()
-                await pool.release(self.pg_conn)
-            if self.sqlite_conn:
-                await self.sqlite_conn.close()
-        finally:
-            _db_lock.release()
+        if self.pg_conn:
+            pool = await _get_pool()
+            await pool.release(self.pg_conn)
+        if self.sqlite_conn:
+            await self.sqlite_conn.close()
 
     async def execute(self, query: str, params: tuple = ()):
         q = _format_query(query)
