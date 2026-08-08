@@ -125,12 +125,13 @@ async def init_db():
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS lands (
-                    id          SERIAL PRIMARY KEY,
-                    guild_id    BIGINT  NOT NULL DEFAULT 0,
-                    name        TEXT    NOT NULL,
-                    owner_id    BIGINT  NOT NULL,
-                    chunks      INTEGER NOT NULL DEFAULT 0,
-                    created_at  TEXT    NOT NULL
+                    id            SERIAL PRIMARY KEY,
+                    guild_id      BIGINT  NOT NULL DEFAULT 0,
+                    name          TEXT    NOT NULL,
+                    owner_id      BIGINT  NOT NULL,
+                    chunks        INTEGER NOT NULL DEFAULT 0,
+                    bonus_members INTEGER NOT NULL DEFAULT 0,
+                    created_at    TEXT    NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS members (
@@ -164,6 +165,7 @@ async def init_db():
             migrations = [
                 # Add guild_id to lands
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
                 # Drop old unique constraints on lands that don't include guild_id
                 "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_name_key",
                 "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_owner_id_key",
@@ -196,12 +198,13 @@ async def init_db():
             await db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS lands (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id    INTEGER NOT NULL DEFAULT 0,
-                    name        TEXT    NOT NULL COLLATE NOCASE,
-                    owner_id    INTEGER NOT NULL,
-                    chunks      INTEGER NOT NULL DEFAULT 0,
-                    created_at  TEXT    NOT NULL
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id      INTEGER NOT NULL DEFAULT 0,
+                    name          TEXT    NOT NULL COLLATE NOCASE,
+                    owner_id      INTEGER NOT NULL,
+                    chunks        INTEGER NOT NULL DEFAULT 0,
+                    bonus_members INTEGER NOT NULL DEFAULT 0,
+                    created_at    TEXT    NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS members (
@@ -246,6 +249,7 @@ async def init_db():
             # Soft migrations
             for migration in [
                 "ALTER TABLE lands ADD COLUMN guild_id INTEGER DEFAULT 0",
+                "ALTER TABLE lands ADD COLUMN bonus_members INTEGER DEFAULT 0",
                 "ALTER TABLE reserve ADD COLUMN leftover_blocks INTEGER DEFAULT 0",
             ]:
                 try:
@@ -387,8 +391,16 @@ async def remove_member(land_id: int, user_id: int) -> bool:
 
 async def get_member_count(land_id: int) -> int:
     async with DBConnection() as conn:
-        row = await conn.fetchone("SELECT COUNT(*) as count FROM members WHERE land_id = ?", (land_id,))
-        return row["count"] if row else 0
+        m_row = await conn.fetchone("SELECT COUNT(*) as count FROM members WHERE land_id = ?", (land_id,))
+        l_row = await conn.fetchone("SELECT bonus_members FROM lands WHERE id = ?", (land_id,))
+        discord_count = m_row["count"] if m_row else 0
+        bonus_count = (l_row["bonus_members"] if l_row and "bonus_members" in l_row and l_row["bonus_members"] else 0)
+        return discord_count + bonus_count
+
+
+async def update_bonus_members(land_id: int, bonus_members: int):
+    async with DBConnection() as conn:
+        await conn.execute("UPDATE lands SET bonus_members = ? WHERE id = ?", (bonus_members, land_id))
 
 
 async def get_members(land_id: int) -> list[int]:

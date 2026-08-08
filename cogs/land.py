@@ -253,6 +253,37 @@ class LandCog(commands.GroupCog, name="land"):
         embed.set_footer(text=f"Adjusted by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="add_member_count", description="[Staff] Increase/decrease a land's manual member count (for non-Discord users)")
+    @app_commands.describe(land_name="Name of the land", amount="Amount to add (use negative number to decrease, e.g. 2 or -1)")
+    @app_commands.guild_only()
+    async def add_member_count(self, interaction: discord.Interaction, land_name: str, amount: int):
+        await interaction.response.defer()
+
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        land = await db.get_land_by_name(interaction.guild_id, land_name)
+        if not land:
+            return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+
+        old_bonus = land.get("bonus_members", 0) if "bonus_members" in land and land["bonus_members"] else 0
+        new_bonus = max(0, old_bonus + amount)
+        await db.update_bonus_members(land["id"], new_bonus)
+
+        total_members = await db.get_member_count(land["id"])
+
+        change_str = f"+{amount}" if amount > 0 else str(amount)
+        embed = discord.Embed(
+            title="👥 Manual Member Count Adjusted",
+            colour=discord.Colour.green() if amount > 0 else discord.Colour.orange()
+        )
+        embed.add_field(name="Land", value=land["name"], inline=True)
+        embed.add_field(name="Adjustment", value=change_str, inline=True)
+        embed.add_field(name="Manual Bonus Members", value=str(new_bonus), inline=True)
+        embed.add_field(name="Total Member Count", value=f"**{total_members}** (+2 queue score each)", inline=False)
+        embed.set_footer(text=f"Adjusted by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
     @app_commands.command(name="delete", description="[Staff] Delete a registered land")
     @app_commands.describe(land_name="Name of the land to delete")
     @app_commands.guild_only()
