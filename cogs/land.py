@@ -207,6 +207,35 @@ class LandCog(commands.GroupCog, name="land"):
         embed.set_footer(text=f"Updated by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="add_chunks", description="[Staff] Increase or decrease a land's chunk count by X")
+    @app_commands.describe(land_name="Name of the land", amount="Amount to add (use negative number to decrease, e.g. 3 or -2)")
+    @app_commands.guild_only()
+    async def add_chunks(self, interaction: discord.Interaction, land_name: str, amount: int):
+        await interaction.response.defer()
+
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        land = await db.get_land_by_name(interaction.guild_id, land_name)
+        if not land:
+            return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+
+        old_chunks = land["chunks"]
+        new_chunks = max(0, old_chunks + amount)
+        await db.update_land_chunks(land["id"], new_chunks)
+
+        change_str = f"+{amount}" if amount > 0 else str(amount)
+        embed = discord.Embed(
+            title="⚙️ Land Chunks Adjusted",
+            colour=discord.Colour.blue() if amount > 0 else discord.Colour.orange()
+        )
+        embed.add_field(name="Land", value=land["name"], inline=True)
+        embed.add_field(name="Adjustment", value=change_str, inline=True)
+        embed.add_field(name="Old Chunks", value=str(old_chunks), inline=True)
+        embed.add_field(name="New Chunks", value=str(new_chunks), inline=True)
+        embed.set_footer(text=f"Adjusted by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
     @app_commands.command(name="delete", description="[Staff] Delete a registered land")
     @app_commands.describe(land_name="Name of the land to delete")
     @app_commands.guild_only()
