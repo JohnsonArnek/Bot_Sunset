@@ -562,3 +562,12 @@ async def add_leftover_blocks(guild_id: int, amount: int):
             "UPDATE reserve SET leftover_blocks = leftover_blocks + ? WHERE guild_id = ?",
             (amount, guild_id),
         )
+
+
+async def update_protected_min(guild_id: int, protected_min: int):
+    async with DBConnection() as conn:
+        await get_reserve(guild_id)
+        await conn.execute(
+            "UPDATE reserve SET protected_min = ? WHERE guild_id = ?",
+            (protected_min, guild_id),
+        )

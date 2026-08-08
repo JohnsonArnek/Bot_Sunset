@@ -162,6 +162,28 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         embed.set_footer(text=f"Adjusted by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="set_protected", description="[Staff] Set the minimum protected reserve block count")
+    @app_commands.describe(amount="Minimum protected reserve blocks not for sale (default 3)")
+    @app_commands.guild_only()
+    async def set_protected(self, interaction: discord.Interaction, amount: int):
+        await interaction.response.defer()
+
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+        if amount < 0:
+            return await interaction.followup.send("❌ Protected minimum cannot be negative.", ephemeral=True)
+
+        await db.update_protected_min(interaction.guild_id, amount)
+        await db.set_config(interaction.guild_id, "protected_min", str(amount))
+
+        embed = discord.Embed(
+            title="🛡️ Protected Reserve Updated",
+            colour=discord.Colour.blue(),
+            description=f"Set protected reserve minimum to **{amount}** block(s).",
+        )
+        embed.set_footer(text=f"Updated by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ReserveCog(bot))

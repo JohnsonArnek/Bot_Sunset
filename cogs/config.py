@@ -20,6 +20,7 @@ VALID_KEYS = {
     "max_queue_chunks": "Max chunks a land can request per queue submission (default 1)",
     "reserve_mode": "Reserve policy mode: 'topup' or 'fixed' (default topup)",
     "weekly_reserve_blocks": "Fixed blocks allocated to reserve in fixed mode (default 2)",
+    "protected_min": "Minimum protected reserve blocks not for sale (default 3)",
 }
 
 
@@ -53,6 +54,11 @@ class ConfigCog(commands.GroupCog, name="config"):
             return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
 
         await db.set_config(interaction.guild_id, key.value, value)
+        if key.value == "protected_min":
+            try:
+                await db.update_protected_min(interaction.guild_id, int(value))
+            except ValueError:
+                pass
 
         embed = discord.Embed(title="⚙️ Config Updated", colour=discord.Colour.blurple())
         embed.add_field(name="Key", value=f"`{key.value}`", inline=True)
