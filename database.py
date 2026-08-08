@@ -6,9 +6,12 @@ All data is partitioned by Discord guild_id (per-server isolation).
 
 import os
 import re
+import logging
 import aiosqlite
 import asyncpg
 from datetime import datetime, timezone
+
+log = logging.getLogger("claims-bot")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 IS_POSTGRES = DATABASE_URL is not None and (DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://"))
@@ -132,6 +135,7 @@ async def init_db():
     if IS_POSTGRES:
         conn = await asyncpg.connect(DATABASE_URL)
         try:
+            # ── Create tables (only runs if they don't exist yet) ──
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS lands (
@@ -166,26 +170,39 @@ async def init_db():
                     price_paid    INTEGER NOT NULL DEFAULT 0,
                     purchased_at  TEXT    NOT NULL
                 );
+                """
+            )
 
-                CREATE TABLE IF NOT EXISTS reserve (
-                    guild_id       BIGINT PRIMARY KEY,
-                    total_blocks   INTEGER NOT NULL DEFAULT 0,
-                    protected_min  INTEGER NOT NULL DEFAULT 3,
-                    leftover_blocks INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE TABLE IF NOT EXISTS config (
+            # ── Migrations for existing databases ──
+            # Each migration is wrapped in a DO block so failures don't abort the batch.
+            migrations = [
+                # Add guild_id to lands
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
+                # Drop old unique constraints on lands that don't include guild_id
+                "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_name_key",
+                "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_owner_id_key",
+                # Migrate config table: drop old, recreate with guild scoping
+                "DROP TABLE IF EXISTS config",
+                """CREATE TABLE IF NOT EXISTS config (
                     guild_id BIGINT NOT NULL,
                     key      TEXT   NOT NULL,
                     value    TEXT   NOT NULL,
                     PRIMARY KEY (guild_id, key)
-                );
-
-                -- Migrations for existing databases
-                ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0;
-                ALTER TABLE reserve ADD COLUMN IF NOT EXISTS leftover_blocks INTEGER DEFAULT 0;
-                """
-            )
+                )""",
+                # Migrate reserve table: drop old, recreate with guild scoping
+                "DROP TABLE IF EXISTS reserve",
+                """CREATE TABLE IF NOT EXISTS reserve (
+                    guild_id        BIGINT PRIMARY KEY,
+                    total_blocks    INTEGER NOT NULL DEFAULT 0,
+                    protected_min   INTEGER NOT NULL DEFAULT 3,
+                    leftover_blocks INTEGER NOT NULL DEFAULT 0
+                )""",
+            ]
+            for sql in migrations:
+                try:
+                    await conn.execute(sql)
+                except Exception as e:
+                    log.warning(f"Migration skipped: {e}")
         finally:
             await conn.close()
     else:
