@@ -13,11 +13,16 @@ import models
 
 
 async def _is_staff(interaction: discord.Interaction) -> bool:
-    """Check if the invoking user has the configured staff role on this server."""
+    """Check if the invoking user has staff permissions on this server."""
+    if not interaction.guild:
+        return False
+    if interaction.user.guild_permissions.administrator:
+        return True
     staff_role_id = await db.get_staff_role_id(interaction.guild_id)
     if staff_role_id == 0:
-        return interaction.user.id == interaction.guild.owner_id
-    return any(r.id == staff_role_id for r in interaction.user.roles)
+        owner_id = interaction.guild.owner_id or (interaction.guild.owner.id if interaction.guild.owner else None)
+        return interaction.user.id == owner_id
+    return any(r.id == staff_role_id for r in getattr(interaction.user, "roles", []))
 
 
 class ClaimsCog(commands.GroupCog, name="claim"):
