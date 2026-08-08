@@ -157,34 +157,30 @@ async def init_db():
                     price_paid    INTEGER NOT NULL DEFAULT 0,
                     purchased_at  TEXT    NOT NULL
                 );
-                """
-            )
 
-            # ── Migrations for existing databases ──
-            # Each migration is wrapped in a DO block so failures don't abort the batch.
-            migrations = [
-                # Add guild_id to lands
-                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
-                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
-                # Drop old unique constraints on lands that don't include guild_id
-                "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_name_key",
-                "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_owner_id_key",
-                # Migrate config table: drop old, recreate with guild scoping
-                "DROP TABLE IF EXISTS config",
-                """CREATE TABLE IF NOT EXISTS config (
+                CREATE TABLE IF NOT EXISTS config (
                     guild_id BIGINT NOT NULL,
                     key      TEXT   NOT NULL,
                     value    TEXT   NOT NULL,
                     PRIMARY KEY (guild_id, key)
-                )""",
-                # Migrate reserve table: drop old, recreate with guild scoping
-                "DROP TABLE IF EXISTS reserve",
-                """CREATE TABLE IF NOT EXISTS reserve (
+                );
+
+                CREATE TABLE IF NOT EXISTS reserve (
                     guild_id        BIGINT PRIMARY KEY,
                     total_blocks    INTEGER NOT NULL DEFAULT 0,
                     protected_min   INTEGER NOT NULL DEFAULT 3,
                     leftover_blocks INTEGER NOT NULL DEFAULT 0
-                )""",
+                );
+                """
+            )
+
+            # ── Migrations for existing databases ──
+            migrations = [
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
+                "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_name_key",
+                "ALTER TABLE lands DROP CONSTRAINT IF EXISTS lands_owner_id_key",
+                "ALTER TABLE reserve ADD COLUMN IF NOT EXISTS leftover_blocks INTEGER DEFAULT 0",
             ]
             for sql in migrations:
                 try:
