@@ -1,5 +1,6 @@
 """
-Land cog — /land create, /land info, /land member_add, /land member_remove, /land set_chunks
+Land cog — /land create, /land info, /land list, /land member_add, /land member_remove, /land set_chunks
+All commands are scoped per Discord server (guild).
 """
 
 import discord
@@ -11,7 +12,7 @@ import models
 
 
 async def _is_staff(interaction: discord.Interaction) -> bool:
-    staff_role_id = await db.get_staff_role_id()
+    staff_role_id = await db.get_staff_role_id(interaction.guild_id)
     if staff_role_id == 0:
         return interaction.user.id == interaction.guild.owner_id
     return any(r.id == staff_role_id for r in interaction.user.roles)
@@ -24,6 +25,7 @@ class LandCog(commands.GroupCog, name="land"):
 
     @app_commands.command(name="create", description="[Staff] Create a new land")
     @app_commands.describe(name="Name for the land", owner="Discord member owning this land", chunks="Starting chunk count (default 0)")
+    @app_commands.guild_only()
     async def land_create(self, interaction: discord.Interaction, name: str, owner: discord.Member, chunks: int = 0):
         await interaction.response.defer()
 
@@ -33,18 +35,18 @@ class LandCog(commands.GroupCog, name="land"):
         if chunks < 0:
             return await interaction.followup.send("❌ Chunks cannot be negative.", ephemeral=True)
 
-        existing = await db.get_land_by_owner(owner.id)
+        existing = await db.get_land_by_owner(interaction.guild_id, owner.id)
         if existing:
             return await interaction.followup.send(
-                f"❌ {owner.mention} already owns **{existing['name']}**.", ephemeral=True
+                f"❌ {owner.mention} already owns **{existing['name']}** on this server.", ephemeral=True
             )
-        name_check = await db.get_land_by_name(name)
+        name_check = await db.get_land_by_name(interaction.guild_id, name)
         if name_check:
             return await interaction.followup.send(
-                f"❌ A land named **{name}** already exists.", ephemeral=True
+                f"❌ A land named **{name}** already exists on this server.", ephemeral=True
             )
 
-        land_id = await db.create_land(name, owner.id, chunks)
+        land_id = await db.create_land(interaction.guild_id, name, owner.id, chunks)
         embed = discord.Embed(title="🏰 Land Created", colour=discord.Colour.green())
         embed.add_field(name="Name", value=name, inline=True)
         embed.add_field(name="Owner", value=owner.mention, inline=True)
@@ -54,16 +56,17 @@ class LandCog(commands.GroupCog, name="land"):
 
     @app_commands.command(name="info", description="View info about a land")
     @app_commands.describe(name="Land name (leave empty for yours)")
+    @app_commands.guild_only()
     async def land_info(self, interaction: discord.Interaction, name: str = None):
         await interaction.response.defer()
 
-        land = await db.get_land_by_name(name) if name else await db.get_land_for_user(interaction.user.id)
+        land = await db.get_land_by_name(interaction.guild_id, name) if name else await db.get_land_for_user(interaction.guild_id, interaction.user.id)
         if not land:
-            return await interaction.followup.send("❌ Land not found.", ephemeral=True)
+            return await interaction.followup.send("❌ Land not found on this server.", ephemeral=True)
 
         member_count = await db.get_member_count(land["id"])
         members_list = await db.get_members(land["id"])
-        full_cost = await db.get_full_block_cost()
+        full_cost = await db.get_full_block_cost(interaction.guild_id)
         price = models.block_price(land["chunks"], full_cost)
         tier = models.price_tier_label(land["chunks"], full_cost)
         res_price = models.reserve_price(land["chunks"], full_cost)
@@ -94,81 +97,16 @@ class LandCog(commands.GroupCog, name="land"):
             embed.add_field(name="Members", value=", ".join(member_mentions), inline=False)
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="member_add", description="Add a member to your land")
-    @app_commands.describe(user="The user to add")
-    async def member_add(self, interaction: discord.Interaction, user: discord.Member):
-        await interaction.response.defer()
-
-        land = await db.get_land_by_owner(interaction.user.id)
-        if not land:
-            return await interaction.followup.send("❌ You must be a land owner.", ephemeral=True)
-        if user.id == interaction.user.id:
-            return await interaction.followup.send("❌ You're already the owner.", ephemeral=True)
-        existing = await db.get_land_for_user(user.id)
-        if existing:
-            return await interaction.followup.send(
-                f"❌ {user.mention} already belongs to **{existing['name']}**.", ephemeral=True)
-
-        await db.add_member(land["id"], user.id)
-        count = await db.get_member_count(land["id"])
-        embed = discord.Embed(title="👥 Member Added", colour=discord.Colour.green(),
-                              description=f"{user.mention} joined **{land['name']}**.")
-        embed.add_field(name="Total Members", value=str(count))
-        embed.set_footer(text="+2 queue score per member")
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="member_remove", description="Remove a member from your land")
-    @app_commands.describe(user="The user to remove")
-    async def member_remove(self, interaction: discord.Interaction, user: discord.Member):
-        await interaction.response.defer()
-
-        land = await db.get_land_by_owner(interaction.user.id)
-        if not land:
-            return await interaction.followup.send("❌ You must be a land owner.", ephemeral=True)
-        removed = await db.remove_member(land["id"], user.id)
-        if not removed:
-            return await interaction.followup.send(
-                f"❌ {user.mention} is not in **{land['name']}**.", ephemeral=True)
-        count = await db.get_member_count(land["id"])
-        embed = discord.Embed(title="👥 Member Removed", colour=discord.Colour.orange(),
-                              description=f"{user.mention} removed from **{land['name']}**.")
-        embed.add_field(name="Members Remaining", value=str(count))
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="set_chunks", description="[Staff] Set a land's chunk count manually")
-    @app_commands.describe(land_name="Name of the land", chunks="New chunk count")
-    async def set_chunks(self, interaction: discord.Interaction, land_name: str, chunks: int):
-        await interaction.response.defer()
-
-        if not await _is_staff(interaction):
-            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
-
-        if chunks < 0:
-            return await interaction.followup.send("❌ Chunks cannot be negative.", ephemeral=True)
-
-        land = await db.get_land_by_name(land_name)
-        if not land:
-            return await interaction.followup.send(f"❌ Land **{land_name}** not found.", ephemeral=True)
-
-        old_chunks = land["chunks"]
-        await db.update_land_chunks(land["id"], chunks)
-
-        embed = discord.Embed(title="⚙️ Land Chunks Updated", colour=discord.Colour.orange())
-        embed.add_field(name="Land", value=land["name"], inline=True)
-        embed.add_field(name="Old Chunks", value=str(old_chunks), inline=True)
-        embed.add_field(name="New Chunks", value=str(chunks), inline=True)
-        embed.set_footer(text=f"Updated by {interaction.user.display_name}")
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="list", description="List all registered lands")
+    @app_commands.command(name="list", description="List all registered lands on this server")
+    @app_commands.guild_only()
     async def land_list(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        lands = await db.get_all_lands()
+        lands = await db.get_all_lands(interaction.guild_id)
         if not lands:
             embed = discord.Embed(
                 title="🏰 Registered Lands",
-                description="No lands registered yet.",
+                description="No lands registered on this server yet.",
                 colour=discord.Colour.light_grey(),
             )
             return await interaction.followup.send(embed=embed)
@@ -193,6 +131,75 @@ class LandCog(commands.GroupCog, name="land"):
         if len(lands) > 25:
             embed.set_footer(text=f"Showing top 25 of {len(lands)} lands.")
 
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="member_add", description="Add a member to your land")
+    @app_commands.describe(user="The user to add")
+    @app_commands.guild_only()
+    async def member_add(self, interaction: discord.Interaction, user: discord.Member):
+        await interaction.response.defer()
+
+        land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
+        if not land:
+            return await interaction.followup.send("❌ You must be a land owner on this server.", ephemeral=True)
+        if user.id == interaction.user.id:
+            return await interaction.followup.send("❌ You're already the owner.", ephemeral=True)
+        existing = await db.get_land_for_user(interaction.guild_id, user.id)
+        if existing:
+            return await interaction.followup.send(
+                f"❌ {user.mention} already belongs to **{existing['name']}** on this server.", ephemeral=True)
+
+        await db.add_member(land["id"], user.id)
+        count = await db.get_member_count(land["id"])
+        embed = discord.Embed(title="👥 Member Added", colour=discord.Colour.green(),
+                              description=f"{user.mention} joined **{land['name']}**.")
+        embed.add_field(name="Total Members", value=str(count))
+        embed.set_footer(text="+2 queue score per member")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="member_remove", description="Remove a member from your land")
+    @app_commands.describe(user="The user to remove")
+    @app_commands.guild_only()
+    async def member_remove(self, interaction: discord.Interaction, user: discord.Member):
+        await interaction.response.defer()
+
+        land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
+        if not land:
+            return await interaction.followup.send("❌ You must be a land owner on this server.", ephemeral=True)
+        removed = await db.remove_member(land["id"], user.id)
+        if not removed:
+            return await interaction.followup.send(
+                f"❌ {user.mention} is not in **{land['name']}**.", ephemeral=True)
+        count = await db.get_member_count(land["id"])
+        embed = discord.Embed(title="👥 Member Removed", colour=discord.Colour.orange(),
+                              description=f"{user.mention} removed from **{land['name']}**.")
+        embed.add_field(name="Members Remaining", value=str(count))
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="set_chunks", description="[Staff] Set a land's chunk count manually")
+    @app_commands.describe(land_name="Name of the land", chunks="New chunk count")
+    @app_commands.guild_only()
+    async def set_chunks(self, interaction: discord.Interaction, land_name: str, chunks: int):
+        await interaction.response.defer()
+
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        if chunks < 0:
+            return await interaction.followup.send("❌ Chunks cannot be negative.", ephemeral=True)
+
+        land = await db.get_land_by_name(interaction.guild_id, land_name)
+        if not land:
+            return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+
+        old_chunks = land["chunks"]
+        await db.update_land_chunks(land["id"], chunks)
+
+        embed = discord.Embed(title="⚙️ Land Chunks Updated", colour=discord.Colour.orange())
+        embed.add_field(name="Land", value=land["name"], inline=True)
+        embed.add_field(name="Old Chunks", value=str(old_chunks), inline=True)
+        embed.add_field(name="New Chunks", value=str(chunks), inline=True)
+        embed.set_footer(text=f"Updated by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
 

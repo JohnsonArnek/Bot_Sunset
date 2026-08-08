@@ -1,6 +1,7 @@
 """
 Database schema and async helper functions supporting both SQLite and PostgreSQL.
 Uses aiosqlite for local storage and asyncpg for PostgreSQL cloud database.
+All data is partitioned by Discord guild_id (per-server isolation).
 """
 
 import os
@@ -12,6 +13,16 @@ from datetime import datetime, timezone
 DATABASE_URL = os.environ.get("DATABASE_URL")
 IS_POSTGRES = DATABASE_URL is not None and (DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://"))
 DB_PATH = "claims.db"
+
+DEFAULT_CONFIG = {
+    "full_block_cost": "50",
+    "staff_role_id": "0",
+    "weekly_reset_day": "0",
+    "weekly_blocks": "7",
+    "distribution_day": "0",
+    "distribution_hour": "0",
+    "last_distribution": "",
+}
 
 
 def _format_query(query: str) -> str:
@@ -101,7 +112,7 @@ class DBConnection:
 
 
 async def init_db():
-    """Create all tables if they don't exist. Called once on bot startup."""
+    """Create all tables if they don't exist and run schema migrations. Called on startup."""
     if IS_POSTGRES:
         conn = await asyncpg.connect(DATABASE_URL)
         try:
@@ -109,8 +120,9 @@ async def init_db():
                 """
                 CREATE TABLE IF NOT EXISTS lands (
                     id          SERIAL PRIMARY KEY,
-                    name        TEXT    NOT NULL UNIQUE,
-                    owner_id    BIGINT  NOT NULL UNIQUE,
+                    guild_id    BIGINT  NOT NULL DEFAULT 0,
+                    name        TEXT    NOT NULL,
+                    owner_id    BIGINT  NOT NULL,
                     chunks      INTEGER NOT NULL DEFAULT 0,
                     created_at  TEXT    NOT NULL
                 );
@@ -140,29 +152,20 @@ async def init_db():
                 );
 
                 CREATE TABLE IF NOT EXISTS reserve (
-                    id             INTEGER PRIMARY KEY CHECK (id = 1),
-                    total_blocks   INTEGER NOT NULL DEFAULT 10,
+                    guild_id       BIGINT PRIMARY KEY,
+                    total_blocks   INTEGER NOT NULL DEFAULT 0,
                     protected_min  INTEGER NOT NULL DEFAULT 3
                 );
 
                 CREATE TABLE IF NOT EXISTS config (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
+                    guild_id BIGINT NOT NULL,
+                    key      TEXT   NOT NULL,
+                    value    TEXT   NOT NULL,
+                    PRIMARY KEY (guild_id, key)
                 );
 
-                -- Seed reserve row if missing
-                INSERT INTO reserve (id, total_blocks, protected_min)
-                VALUES (1, 0, 3)
-                ON CONFLICT (id) DO NOTHING;
-
-                -- Seed default config
-                INSERT INTO config (key, value) VALUES ('full_block_cost', '50') ON CONFLICT DO NOTHING;
-                INSERT INTO config (key, value) VALUES ('staff_role_id', '0') ON CONFLICT DO NOTHING;
-                INSERT INTO config (key, value) VALUES ('weekly_reset_day', '0') ON CONFLICT DO NOTHING;
-                INSERT INTO config (key, value) VALUES ('weekly_blocks', '7') ON CONFLICT DO NOTHING;
-                INSERT INTO config (key, value) VALUES ('distribution_day', '0') ON CONFLICT DO NOTHING;
-                INSERT INTO config (key, value) VALUES ('distribution_hour', '0') ON CONFLICT DO NOTHING;
-                INSERT INTO config (key, value) VALUES ('last_distribution', '') ON CONFLICT DO NOTHING;
+                -- Migrations for existing databases
+                ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0;
                 """
             )
         finally:
@@ -173,8 +176,9 @@ async def init_db():
                 """
                 CREATE TABLE IF NOT EXISTS lands (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name        TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-                    owner_id    INTEGER NOT NULL UNIQUE,
+                    guild_id    INTEGER NOT NULL DEFAULT 0,
+                    name        TEXT    NOT NULL COLLATE NOCASE,
+                    owner_id    INTEGER NOT NULL,
                     chunks      INTEGER NOT NULL DEFAULT 0,
                     created_at  TEXT    NOT NULL
                 );
@@ -204,81 +208,92 @@ async def init_db():
                 );
 
                 CREATE TABLE IF NOT EXISTS reserve (
-                    id             INTEGER PRIMARY KEY CHECK (id = 1),
-                    total_blocks   INTEGER NOT NULL DEFAULT 10,
+                    guild_id       INTEGER PRIMARY KEY,
+                    total_blocks   INTEGER NOT NULL DEFAULT 0,
                     protected_min  INTEGER NOT NULL DEFAULT 3
                 );
 
                 CREATE TABLE IF NOT EXISTS config (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
+                    guild_id INTEGER NOT NULL,
+                    key      TEXT    NOT NULL,
+                    value    TEXT    NOT NULL,
+                    PRIMARY KEY (guild_id, key)
                 );
-
-                -- Seed reserve row if missing
-                INSERT OR IGNORE INTO reserve (id, total_blocks, protected_min)
-                VALUES (1, 0, 3);
-
-                -- Seed default config
-                INSERT OR IGNORE INTO config (key, value) VALUES ('full_block_cost', '50');
-                INSERT OR IGNORE INTO config (key, value) VALUES ('staff_role_id', '0');
-                INSERT OR IGNORE INTO config (key, value) VALUES ('weekly_reset_day', '0');
-                INSERT OR IGNORE INTO config (key, value) VALUES ('weekly_blocks', '7');
-                INSERT OR IGNORE INTO config (key, value) VALUES ('distribution_day', '0');
-                INSERT OR IGNORE INTO config (key, value) VALUES ('distribution_hour', '0');
-                INSERT OR IGNORE INTO config (key, value) VALUES ('last_distribution', '');
                 """
             )
+            # Soft migrations
+            try:
+                await db.execute("ALTER TABLE lands ADD COLUMN guild_id INTEGER DEFAULT 0")
+            except Exception:
+                pass
             await db.commit()
 
 
 # ── Config helpers ────────────────────────────────────────────────────
 
-async def get_config(key: str) -> str | None:
+async def get_config(guild_id: int, key: str) -> str:
     async with DBConnection() as conn:
-        row = await conn.fetchone("SELECT value FROM config WHERE key = ?", (key,))
-        return row["value"] if row else None
-
-
-async def set_config(key: str, value: str):
-    async with DBConnection() as conn:
-        await conn.execute(
-            "INSERT INTO config (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
+        row = await conn.fetchone(
+            "SELECT value FROM config WHERE guild_id = ? AND key = ?",
+            (guild_id, key),
         )
+        if row:
+            return row["value"]
+        return DEFAULT_CONFIG.get(key, "")
 
 
-async def get_full_block_cost() -> int:
-    val = await get_config("full_block_cost")
+async def set_config(guild_id: int, key: str, value: str):
+    async with DBConnection() as conn:
+        if IS_POSTGRES:
+            await conn.execute(
+                "INSERT INTO config (guild_id, key, value) VALUES (?, ?, ?) "
+                "ON CONFLICT (guild_id, key) DO UPDATE SET value = EXCLUDED.value",
+                (guild_id, key, value),
+            )
+        else:
+            await conn.execute(
+                "INSERT INTO config (guild_id, key, value) VALUES (?, ?, ?) "
+                "ON CONFLICT(guild_id, key) DO UPDATE SET value = excluded.value",
+                (guild_id, key, value),
+            )
+
+
+async def get_full_block_cost(guild_id: int) -> int:
+    val = await get_config(guild_id, "full_block_cost")
     return int(val) if val else 50
 
 
-async def get_staff_role_id() -> int:
-    val = await get_config("staff_role_id")
+async def get_staff_role_id(guild_id: int) -> int:
+    val = await get_config(guild_id, "staff_role_id")
     return int(val) if val else 0
 
 
 # ── Land helpers ──────────────────────────────────────────────────────
 
-async def create_land(name: str, owner_id: int, chunks: int = 0) -> int:
+async def create_land(guild_id: int, name: str, owner_id: int, chunks: int = 0) -> int:
     now = datetime.now(timezone.utc).isoformat()
     async with DBConnection() as conn:
         row = await conn.fetchone(
-            "INSERT INTO lands (name, owner_id, chunks, created_at) VALUES (?, ?, ?, ?) RETURNING id",
-            (name, owner_id, chunks, now),
+            "INSERT INTO lands (guild_id, name, owner_id, chunks, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+            (guild_id, name, owner_id, chunks, now),
         )
         return row["id"]
 
 
-async def get_land_by_owner(owner_id: int) -> dict | None:
+async def get_land_by_owner(guild_id: int, owner_id: int) -> dict | None:
     async with DBConnection() as conn:
-        return await conn.fetchone("SELECT * FROM lands WHERE owner_id = ?", (owner_id,))
+        return await conn.fetchone(
+            "SELECT * FROM lands WHERE guild_id = ? AND owner_id = ?",
+            (guild_id, owner_id),
+        )
 
 
-async def get_land_by_name(name: str) -> dict | None:
+async def get_land_by_name(guild_id: int, name: str) -> dict | None:
     async with DBConnection() as conn:
-        # Use case-insensitive LOWER check for both SQL engines
-        return await conn.fetchone("SELECT * FROM lands WHERE LOWER(name) = LOWER(?)", (name,))
+        return await conn.fetchone(
+            "SELECT * FROM lands WHERE guild_id = ? AND LOWER(name) = LOWER(?)",
+            (guild_id, name),
+        )
 
 
 async def get_land_by_id(land_id: int) -> dict | None:
@@ -291,29 +306,32 @@ async def update_land_chunks(land_id: int, new_chunks: int):
         await conn.execute("UPDATE lands SET chunks = ? WHERE id = ?", (new_chunks, land_id))
 
 
-async def get_land_for_user(user_id: int) -> dict | None:
-    """Get a land where the user is either owner or member."""
-    land = await get_land_by_owner(user_id)
+async def get_land_for_user(guild_id: int, user_id: int) -> dict | None:
+    """Get a land where the user is either owner or member in this guild."""
+    land = await get_land_by_owner(guild_id, user_id)
     if land:
         return land
     async with DBConnection() as conn:
         return await conn.fetchone(
-            "SELECT l.* FROM lands l JOIN members m ON l.id = m.land_id WHERE m.user_id = ?",
-            (user_id,),
+            "SELECT l.* FROM lands l JOIN members m ON l.id = m.land_id "
+            "WHERE l.guild_id = ? AND m.user_id = ?",
+            (guild_id, user_id),
         )
 
 
-async def get_all_lands() -> list[dict]:
-    """Get all registered lands ordered by name."""
+async def get_all_lands(guild_id: int) -> list[dict]:
+    """Get all registered lands in this guild ordered by name."""
     async with DBConnection() as conn:
-        return await conn.fetchall("SELECT * FROM lands ORDER BY name ASC")
+        return await conn.fetchall(
+            "SELECT * FROM lands WHERE guild_id = ? ORDER BY name ASC",
+            (guild_id,),
+        )
 
 
 # ── Member helpers ────────────────────────────────────────────────────
 
 async def add_member(land_id: int, user_id: int):
     async with DBConnection() as conn:
-        # Insert with conflict handling
         if IS_POSTGRES:
             await conn.execute(
                 "INSERT INTO members (land_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -378,14 +396,15 @@ async def get_approved_request(land_id: int) -> dict | None:
         )
 
 
-async def get_all_pending_requests() -> list[dict]:
+async def get_all_pending_requests(guild_id: int) -> list[dict]:
     async with DBConnection() as conn:
         return await conn.fetchall(
             "SELECT cr.*, l.name as land_name, l.chunks, l.owner_id "
             "FROM claim_requests cr "
             "JOIN lands l ON cr.land_id = l.id "
-            "WHERE cr.status = 'pending' "
-            "ORDER BY cr.requested_at ASC"
+            "WHERE l.guild_id = ? AND cr.status = 'pending' "
+            "ORDER BY cr.requested_at ASC",
+            (guild_id,),
         )
 
 
@@ -395,7 +414,6 @@ async def update_request_status(request_id: int, status: str):
 
 
 async def update_request_chunks(request_id: int, new_chunks: int):
-    """Update the chunks_requested on a request (for partial fills)."""
     async with DBConnection() as conn:
         await conn.execute(
             "UPDATE claim_requests SET chunks_requested = ? WHERE id = ?",
@@ -403,8 +421,7 @@ async def update_request_chunks(request_id: int, new_chunks: int):
         )
 
 
-async def get_expired_approved_requests(days: int = 7) -> list[dict]:
-    """Get approved requests older than `days` days that were never purchased."""
+async def get_expired_approved_requests(guild_id: int, days: int = 7) -> list[dict]:
     from datetime import timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     async with DBConnection() as conn:
@@ -412,9 +429,9 @@ async def get_expired_approved_requests(days: int = 7) -> list[dict]:
             "SELECT cr.*, l.name as land_name, l.chunks, l.owner_id "
             "FROM claim_requests cr "
             "JOIN lands l ON cr.land_id = l.id "
-            "WHERE cr.status = 'approved' AND cr.requested_at < ? "
+            "WHERE l.guild_id = ? AND cr.status = 'approved' AND cr.requested_at < ? "
             "ORDER BY cr.requested_at ASC",
-            (cutoff,),
+            (guild_id, cutoff),
         )
 
 
@@ -430,7 +447,6 @@ async def record_purchase(land_id: int, purchase_type: str, price_paid: int):
 
 
 async def get_normal_purchase_this_week(land_id: int) -> dict | None:
-    """Check if this land has made a normal purchase since the last weekly reset."""
     from datetime import timedelta
     now = datetime.now(timezone.utc)
     days_since_monday = now.weekday()
@@ -447,16 +463,38 @@ async def get_normal_purchase_this_week(land_id: int) -> dict | None:
 
 # ── Reserve helpers ───────────────────────────────────────────────────
 
-async def get_reserve() -> dict:
+async def get_reserve(guild_id: int) -> dict:
     async with DBConnection() as conn:
-        return await conn.fetchone("SELECT * FROM reserve WHERE id = 1")
+        row = await conn.fetchone("SELECT * FROM reserve WHERE guild_id = ?", (guild_id,))
+        if not row:
+            if IS_POSTGRES:
+                await conn.execute(
+                    "INSERT INTO reserve (guild_id, total_blocks, protected_min) VALUES (?, 0, 3) "
+                    "ON CONFLICT (guild_id) DO NOTHING",
+                    (guild_id,),
+                )
+            else:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO reserve (guild_id, total_blocks, protected_min) VALUES (?, 0, 3)",
+                    (guild_id,),
+                )
+            row = await conn.fetchone("SELECT * FROM reserve WHERE guild_id = ?", (guild_id,))
+        return row
 
 
-async def update_reserve_blocks(new_total: int):
+async def update_reserve_blocks(guild_id: int, new_total: int):
     async with DBConnection() as conn:
-        await conn.execute("UPDATE reserve SET total_blocks = ? WHERE id = 1", (new_total,))
+        await get_reserve(guild_id)
+        await conn.execute(
+            "UPDATE reserve SET total_blocks = ? WHERE guild_id = ?",
+            (new_total, guild_id),
+        )
 
 
-async def add_reserve_blocks(amount: int):
+async def add_reserve_blocks(guild_id: int, amount: int):
     async with DBConnection() as conn:
-        await conn.execute("UPDATE reserve SET total_blocks = total_blocks + ? WHERE id = 1", (amount,))
+        await get_reserve(guild_id)
+        await conn.execute(
+            "UPDATE reserve SET total_blocks = total_blocks + ? WHERE guild_id = ?",
+            (amount, guild_id),
+        )

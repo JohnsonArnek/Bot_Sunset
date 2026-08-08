@@ -1,6 +1,6 @@
 """
 Queue cog — /queue
-Displays all pending claim requests ordered by computed score.
+Displays all pending claim requests ordered by computed score for the current server.
 """
 
 import discord
@@ -16,20 +16,21 @@ class QueueCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="queue", description="View the current claim request queue")
+    @app_commands.guild_only()
     async def queue(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        requests = await db.get_all_pending_requests()
+        requests = await db.get_all_pending_requests(interaction.guild_id)
 
         if not requests:
             embed = discord.Embed(
                 title="📭 Claim Queue",
-                description="The queue is empty — no pending requests.",
+                description="The queue is empty — no pending requests on this server.",
                 colour=discord.Colour.light_grey(),
             )
             return await interaction.followup.send(embed=embed)
 
-        full_cost = await db.get_full_block_cost()
+        full_cost = await db.get_full_block_cost(interaction.guild_id)
 
         # Build scored entries
         entries = []
