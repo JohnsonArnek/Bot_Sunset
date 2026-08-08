@@ -171,6 +171,24 @@ async def init_db():
                     protected_min   INTEGER NOT NULL DEFAULT 3,
                     leftover_blocks INTEGER NOT NULL DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS auctions (
+                    id             SERIAL PRIMARY KEY,
+                    guild_id       BIGINT  NOT NULL,
+                    status         TEXT    NOT NULL DEFAULT 'active',
+                    blocks_offered INTEGER NOT NULL DEFAULT 0,
+                    started_at     TEXT    NOT NULL,
+                    ends_at        TEXT    NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS auction_bids (
+                    id          SERIAL PRIMARY KEY,
+                    auction_id  INTEGER NOT NULL REFERENCES auctions(id) ON DELETE CASCADE,
+                    land_id     INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    bid_amount  INTEGER NOT NULL,
+                    bid_at      TEXT    NOT NULL,
+                    UNIQUE(auction_id, land_id)
+                );
                 """
             )
 
@@ -239,6 +257,24 @@ async def init_db():
                     key      TEXT    NOT NULL,
                     value    TEXT    NOT NULL,
                     PRIMARY KEY (guild_id, key)
+                );
+
+                CREATE TABLE IF NOT EXISTS auctions (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id       INTEGER NOT NULL,
+                    status         TEXT    NOT NULL DEFAULT 'active',
+                    blocks_offered INTEGER NOT NULL DEFAULT 0,
+                    started_at     TEXT    NOT NULL,
+                    ends_at        TEXT    NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS auction_bids (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    auction_id  INTEGER NOT NULL REFERENCES auctions(id) ON DELETE CASCADE,
+                    land_id     INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    bid_amount  INTEGER NOT NULL,
+                    bid_at      TEXT    NOT NULL,
+                    UNIQUE(auction_id, land_id)
                 );
                 """
             )
@@ -571,3 +607,70 @@ async def update_protected_min(guild_id: int, protected_min: int):
             "UPDATE reserve SET protected_min = ? WHERE guild_id = ?",
             (protected_min, guild_id),
         )
+
+
+# ── Auction helpers ───────────────────────────────────────────────────
+
+async def create_auction(guild_id: int, blocks_offered: int, started_at: str, ends_at: str) -> int:
+    async with DBConnection() as conn:
+        if IS_POSTGRES:
+            row = await conn.fetchone(
+                "INSERT INTO auctions (guild_id, status, blocks_offered, started_at, ends_at) "
+                "VALUES (?, 'active', ?, ?, ?) RETURNING id",
+                (guild_id, blocks_offered, started_at, ends_at),
+            )
+            return row["id"]
+        else:
+            await conn.execute(
+                "INSERT INTO auctions (guild_id, status, blocks_offered, started_at, ends_at) "
+                "VALUES (?, 'active', ?, ?, ?)",
+                (guild_id, blocks_offered, started_at, ends_at),
+            )
+            row = await conn.fetchone("SELECT last_insert_rowid() as id")
+            return row["id"]
+
+
+async def get_active_auction(guild_id: int) -> dict | None:
+    async with DBConnection() as conn:
+        return await conn.fetchone(
+            "SELECT * FROM auctions WHERE guild_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+            (guild_id,),
+        )
+
+
+async def place_auction_bid(auction_id: int, land_id: int, bid_amount: int):
+    now = datetime.now(timezone.utc).isoformat()
+    async with DBConnection() as conn:
+        if IS_POSTGRES:
+            await conn.execute(
+                "INSERT INTO auction_bids (auction_id, land_id, bid_amount, bid_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (auction_id, land_id) DO UPDATE SET bid_amount = EXCLUDED.bid_amount, bid_at = EXCLUDED.bid_at",
+                (auction_id, land_id, bid_amount, now),
+            )
+        else:
+            await conn.execute(
+                "INSERT INTO auction_bids (auction_id, land_id, bid_amount, bid_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(auction_id, land_id) DO UPDATE SET bid_amount = excluded.bid_amount, bid_at = excluded.bid_at",
+                (auction_id, land_id, bid_amount, now),
+            )
+
+
+async def get_auction_bids(auction_id: int) -> list[dict]:
+    """Get all bids for an auction ordered highest bid first."""
+    async with DBConnection() as conn:
+        return await conn.fetchall(
+            "SELECT b.*, l.name as land_name, l.owner_id, l.chunks FROM auction_bids b "
+            "JOIN lands l ON b.land_id = l.id WHERE b.auction_id = ? ORDER BY b.bid_amount DESC, b.bid_at ASC",
+            (auction_id,),
+        )
+
+
+async def close_auction(auction_id: int):
+    async with DBConnection() as conn:
+        await conn.execute("UPDATE auctions SET status = 'ended' WHERE id = ?", (auction_id,))
+
+
+async def cancel_auction(auction_id: int):
+    async with DBConnection() as conn:
+        await conn.execute("UPDATE auctions SET status = 'cancelled' WHERE id = ?", (auction_id,))
+

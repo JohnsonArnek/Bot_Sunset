@@ -21,6 +21,9 @@ VALID_KEYS = {
     "reserve_mode": "Reserve policy mode: 'topup' or 'fixed' (default topup)",
     "weekly_reserve_blocks": "Fixed blocks allocated to reserve in fixed mode (default 2)",
     "protected_min": "Minimum protected reserve blocks not for sale (default 3)",
+    "auction_start_day": "Day of week for auction start (0=Mon, 5=Sat, default 5)",
+    "auction_end_day": "Day of week for auction end (0=Mon, 6=Sun, default 6)",
+    "auction_enabled": "Enable/disable weekend reserve block auction ('true' or 'false', default true)",
 }
 
 

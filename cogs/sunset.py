@@ -75,11 +75,23 @@ class SunsetCog(commands.GroupCog, name="sunset"):
         )
 
         embed.add_field(
+            name="🔨 Reserve Block Auctions",
+            value=(
+                "• `/auction status` — View active weekend auction status & top bids.\n"
+                "• `/auction bid <land> <amount>` — Place or raise a bid for a reserve block.\n"
+                "• `/auction start` 🔒 — Manually open a reserve block auction.\n"
+                "• `/auction end` 🔒 — Close & resolve the active auction.\n"
+                "• `/auction cancel` 🔒 — Cancel current auction without resolving."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
             name="ℹ️ Info",
             value=(
                 "• `/reserve view` — View Leftover Pool & Reserve status.\n"
                 "• `/sunset help` — Show this help message.\n"
-                "• Config keys: `weekly_blocks`, `max_queue_chunks`, `reserve_mode`, `weekly_reserve_blocks`"
+                "• Config keys: `weekly_blocks`, `max_queue_chunks`, `reserve_mode`, `weekly_reserve_blocks`, `protected_min`, `auction_enabled`"
             ),
             inline=False,
         )
