@@ -78,6 +78,13 @@ class ClaimsCog(commands.GroupCog, name="claim"):
             )
 
         request_id = await db.create_claim_request(land["id"], chunks, purpose.value)
+        if not request_id:
+            return await interaction.followup.send(
+                "⚠️ Your land already has a pending claim request. "
+                "Wait for it to be processed or cancel it first.",
+                ephemeral=True,
+            )
+
         full_cost = await db.get_full_block_cost(interaction.guild_id)
         price = models.block_price(land["chunks"], full_cost)
 

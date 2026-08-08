@@ -63,27 +63,40 @@ async def _get_pool():
     return _pool
 
 
+import asyncio
+
+_db_lock = asyncio.Lock()
+
+
 class DBConnection:
     def __init__(self):
         self.sqlite_conn = None
         self.pg_conn = None
 
     async def __aenter__(self):
-        if IS_POSTGRES:
-            pool = await _get_pool()
-            self.pg_conn = await pool.acquire()
-            return self
-        else:
-            self.sqlite_conn = await aiosqlite.connect(DB_PATH)
-            self.sqlite_conn.row_factory = aiosqlite.Row
-            return self
+        await _db_lock.acquire()
+        try:
+            if IS_POSTGRES:
+                pool = await _get_pool()
+                self.pg_conn = await pool.acquire()
+                return self
+            else:
+                self.sqlite_conn = await aiosqlite.connect(DB_PATH)
+                self.sqlite_conn.row_factory = aiosqlite.Row
+                return self
+        except Exception:
+            _db_lock.release()
+            raise
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.pg_conn:
-            pool = await _get_pool()
-            await pool.release(self.pg_conn)
-        if self.sqlite_conn:
-            await self.sqlite_conn.close()
+        try:
+            if self.pg_conn:
+                pool = await _get_pool()
+                await pool.release(self.pg_conn)
+            if self.sqlite_conn:
+                await self.sqlite_conn.close()
+        finally:
+            _db_lock.release()
 
     async def execute(self, query: str, params: tuple = ()):
         q = _format_query(query)
@@ -383,9 +396,15 @@ async def get_members(land_id: int) -> list[int]:
 
 # ── Claim request helpers ─────────────────────────────────────────────
 
-async def create_claim_request(land_id: int, chunks_requested: int, purpose: str) -> int:
+async def create_claim_request(land_id: int, chunks_requested: int, purpose: str) -> int | None:
     now = datetime.now(timezone.utc).isoformat()
     async with DBConnection() as conn:
+        existing = await conn.fetchone(
+            "SELECT id FROM claim_requests WHERE land_id = ? AND status = 'pending'",
+            (land_id,),
+        )
+        if existing:
+            return None
         row = await conn.fetchone(
             "INSERT INTO claim_requests (land_id, chunks_requested, purpose, requested_at, status) "
             "VALUES (?, ?, ?, ?, 'pending') RETURNING id",
