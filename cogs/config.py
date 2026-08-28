@@ -24,6 +24,11 @@ VALID_KEYS = {
     "auction_start_day": "Day of week for auction start (0=Mon, 5=Sat, default 5)",
     "auction_end_day": "Day of week for auction end (0=Mon, 6=Sun, default 6)",
     "auction_enabled": "Enable/disable weekend reserve block auction ('true' or 'false', default true)",
+    "claim_mode": "Claim system mode: 'weekly' (queue+distribution) or 'rotation' (daily turn-based)",
+    "rotation_hour": "Hour (UTC) when daily rotation triggers (0-23, default 12)",
+    "rotation_timeout_minutes": "Minutes to wait for reaction before auto-skip (default 720 = 12h)",
+    "rotation_channel_id": "Channel ID for rotation messages (default: first writable channel)",
+    "rotation_daily_blocks": "Blocks generated per daily rotation (default 1)",
 }
 
 

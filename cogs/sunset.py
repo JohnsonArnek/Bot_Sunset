@@ -87,11 +87,25 @@ class SunsetCog(commands.GroupCog, name="sunset"):
         )
 
         embed.add_field(
+            name="🔄 Daily Rotation (Turn-Based)",
+            value=(
+                "For servers using `claim_mode: rotation`:\n"
+                "• `/rotation order` — View current rotation order & prices.\n"
+                "• `/rotation add <land> [position]` — 🔒 Add a land to the rotation.\n"
+                "• `/rotation remove <land>` — 🔒 Remove a land from rotation.\n"
+                "• `/rotation move <land> <position>` — 🔒 Reorder a land.\n"
+                "• `/rotation skip` — 🔒 Skip the current pending offer.\n"
+                "• `/rotation trigger` — 🔒 Manually start today's rotation."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
             name="ℹ️ Info",
             value=(
                 "• `/reserve view` — View Leftover Pool & Reserve status.\n"
                 "• `/sunset help` — Show this help message.\n"
-                "• Config keys: `weekly_blocks`, `max_queue_chunks`, `reserve_mode`, `weekly_reserve_blocks`, `protected_min`, `auction_enabled`"
+                "• Config keys: `weekly_blocks`, `max_queue_chunks`, `reserve_mode`, `weekly_reserve_blocks`, `protected_min`, `auction_enabled`, `claim_mode`, `rotation_hour`"
             ),
             inline=False,
         )

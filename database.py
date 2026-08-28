@@ -189,6 +189,24 @@ async def init_db():
                     bid_at      TEXT    NOT NULL,
                     UNIQUE(auction_id, land_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS rotation_order (
+                    id         SERIAL PRIMARY KEY,
+                    guild_id   BIGINT  NOT NULL,
+                    land_id    INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    position   INTEGER NOT NULL,
+                    UNIQUE(guild_id, land_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS rotation_offers (
+                    id          SERIAL PRIMARY KEY,
+                    guild_id    BIGINT  NOT NULL,
+                    land_id     INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    message_id  BIGINT,
+                    status      TEXT    NOT NULL DEFAULT 'pending',
+                    offered_at  TEXT    NOT NULL,
+                    resolved_at TEXT
+                );
                 """
             )
 
@@ -275,6 +293,24 @@ async def init_db():
                     bid_amount  INTEGER NOT NULL,
                     bid_at      TEXT    NOT NULL,
                     UNIQUE(auction_id, land_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS rotation_order (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id   INTEGER NOT NULL,
+                    land_id    INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    position   INTEGER NOT NULL,
+                    UNIQUE(guild_id, land_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS rotation_offers (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id    INTEGER NOT NULL,
+                    land_id     INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    message_id  INTEGER,
+                    status      TEXT    NOT NULL DEFAULT 'pending',
+                    offered_at  TEXT    NOT NULL,
+                    resolved_at TEXT
                 );
                 """
             )
@@ -673,4 +709,171 @@ async def close_auction(auction_id: int):
 async def cancel_auction(auction_id: int):
     async with DBConnection() as conn:
         await conn.execute("UPDATE auctions SET status = 'cancelled' WHERE id = ?", (auction_id,))
+
+
+# ── Rotation helpers ──────────────────────────────────────────────────
+
+async def get_rotation_order(guild_id: int) -> list[dict]:
+    """Get all lands in the rotation for this guild, ordered by position."""
+    async with DBConnection() as conn:
+        return await conn.fetchall(
+            "SELECT r.*, l.name as land_name, l.owner_id, l.chunks FROM rotation_order r "
+            "JOIN lands l ON r.land_id = l.id WHERE r.guild_id = ? ORDER BY r.position ASC",
+            (guild_id,),
+        )
+
+
+async def add_to_rotation(guild_id: int, land_id: int, position: int = None):
+    """Add a land to the rotation. If position is None, add to the end."""
+    async with DBConnection() as conn:
+        if position is None:
+            row = await conn.fetchone(
+                "SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM rotation_order WHERE guild_id = ?",
+                (guild_id,),
+            )
+            position = row["next_pos"]
+        # Shift existing entries down to make room
+        await conn.execute(
+            "UPDATE rotation_order SET position = position + 1 WHERE guild_id = ? AND position >= ?",
+            (guild_id, position),
+        )
+        if IS_POSTGRES:
+            await conn.execute(
+                "INSERT INTO rotation_order (guild_id, land_id, position) VALUES (?, ?, ?) "
+                "ON CONFLICT (guild_id, land_id) DO UPDATE SET position = EXCLUDED.position",
+                (guild_id, land_id, position),
+            )
+        else:
+            await conn.execute(
+                "INSERT OR REPLACE INTO rotation_order (guild_id, land_id, position) VALUES (?, ?, ?)",
+                (guild_id, land_id, position),
+            )
+
+
+async def remove_from_rotation(guild_id: int, land_id: int) -> bool:
+    """Remove a land from the rotation. Returns True if it was found."""
+    async with DBConnection() as conn:
+        row = await conn.fetchone(
+            "SELECT position FROM rotation_order WHERE guild_id = ? AND land_id = ?",
+            (guild_id, land_id),
+        )
+        if not row:
+            return False
+        pos = row["position"]
+        await conn.execute(
+            "DELETE FROM rotation_order WHERE guild_id = ? AND land_id = ?",
+            (guild_id, land_id),
+        )
+        # Shift remaining entries up
+        await conn.execute(
+            "UPDATE rotation_order SET position = position - 1 WHERE guild_id = ? AND position > ?",
+            (guild_id, pos),
+        )
+        return True
+
+
+async def move_to_bottom(guild_id: int, land_id: int):
+    """Move a land to the bottom of the rotation (highest position number)."""
+    async with DBConnection() as conn:
+        row = await conn.fetchone(
+            "SELECT position FROM rotation_order WHERE guild_id = ? AND land_id = ?",
+            (guild_id, land_id),
+        )
+        if not row:
+            return
+        old_pos = row["position"]
+        max_row = await conn.fetchone(
+            "SELECT COALESCE(MAX(position), 0) as max_pos FROM rotation_order WHERE guild_id = ?",
+            (guild_id,),
+        )
+        max_pos = max_row["max_pos"]
+        if old_pos == max_pos:
+            return  # Already at bottom
+        # Move everyone above down by 1
+        await conn.execute(
+            "UPDATE rotation_order SET position = position - 1 WHERE guild_id = ? AND position > ?",
+            (guild_id, old_pos),
+        )
+        # Move this land to the bottom
+        await conn.execute(
+            "UPDATE rotation_order SET position = ? WHERE guild_id = ? AND land_id = ?",
+            (max_pos, guild_id, land_id),
+        )
+
+
+async def set_rotation_position(guild_id: int, land_id: int, new_position: int):
+    """Move a land to a specific position in the rotation."""
+    await remove_from_rotation(guild_id, land_id)
+    await add_to_rotation(guild_id, land_id, new_position)
+
+
+async def create_rotation_offer(guild_id: int, land_id: int, message_id: int = None) -> int:
+    """Create a new rotation offer record."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with DBConnection() as conn:
+        if IS_POSTGRES:
+            row = await conn.fetchone(
+                "INSERT INTO rotation_offers (guild_id, land_id, message_id, status, offered_at) "
+                "VALUES (?, ?, ?, 'pending', ?) RETURNING id",
+                (guild_id, land_id, message_id, now),
+            )
+            return row["id"]
+        else:
+            await conn.execute(
+                "INSERT INTO rotation_offers (guild_id, land_id, message_id, status, offered_at) "
+                "VALUES (?, ?, ?, 'pending', ?)",
+                (guild_id, land_id, message_id, now),
+            )
+            row = await conn.fetchone("SELECT last_insert_rowid() as id")
+            return row["id"]
+
+
+async def update_rotation_offer(offer_id: int, status: str, message_id: int = None):
+    """Update a rotation offer's status and optionally its message_id."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with DBConnection() as conn:
+        if message_id is not None:
+            await conn.execute(
+                "UPDATE rotation_offers SET status = ?, message_id = ?, resolved_at = ? WHERE id = ?",
+                (status, message_id, now, offer_id),
+            )
+        else:
+            await conn.execute(
+                "UPDATE rotation_offers SET status = ?, resolved_at = ? WHERE id = ?",
+                (status, now, offer_id),
+            )
+
+
+async def get_pending_rotation_offer(guild_id: int) -> dict | None:
+    """Get the currently pending rotation offer for a guild."""
+    async with DBConnection() as conn:
+        return await conn.fetchone(
+            "SELECT o.*, l.name as land_name, l.owner_id, l.chunks FROM rotation_offers o "
+            "JOIN lands l ON o.land_id = l.id "
+            "WHERE o.guild_id = ? AND o.status = 'pending' ORDER BY o.id DESC LIMIT 1",
+            (guild_id,),
+        )
+
+
+async def get_last_rotation_date(guild_id: int) -> str | None:
+    """Get the date string (YYYY-MM-DD) of the last rotation offer for this guild."""
+    async with DBConnection() as conn:
+        row = await conn.fetchone(
+            "SELECT offered_at FROM rotation_offers WHERE guild_id = ? ORDER BY id DESC LIMIT 1",
+            (guild_id,),
+        )
+        if row and row["offered_at"]:
+            return row["offered_at"][:10]  # YYYY-MM-DD
+        return None
+
+
+async def get_rotation_offers_today(guild_id: int, date_str: str) -> list[dict]:
+    """Get all rotation offers for a guild on a specific date."""
+    async with DBConnection() as conn:
+        return await conn.fetchall(
+            "SELECT o.*, l.name as land_name, l.owner_id, l.chunks FROM rotation_offers o "
+            "JOIN lands l ON o.land_id = l.id "
+            "WHERE o.guild_id = ? AND o.offered_at LIKE ? ORDER BY o.id ASC",
+            (guild_id, date_str + "%"),
+        )
 
