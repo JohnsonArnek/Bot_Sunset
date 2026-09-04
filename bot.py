@@ -83,21 +83,27 @@ async def load_extensions():
 
 # ── Events & Error Handling ───────────────────────────────────────────
 
+_synced = False
+
 @bot.event
 async def on_ready():
+    global _synced
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
-    # Sync commands PER-GUILD (instant) instead of global (up to 1 hr delay)
-    for guild in bot.guilds:
-        try:
-            # Clear any stale guild-specific overrides first
-            bot.tree.clear_commands(guild=guild)
-            # Copy the global command tree into this guild and sync
-            bot.tree.copy_global_to(guild=guild)
-            await bot.tree.sync(guild=guild)
-            log.info(f"Synced commands to {guild.name} ({guild.id})")
-        except Exception as e:
-            log.warning(f"Could not sync commands for {guild.name}: {e}")
+    if not _synced:
+        # Sync commands PER-GUILD (instant) — only on first connect, not reconnects
+        for guild in bot.guilds:
+            try:
+                bot.tree.clear_commands(guild=guild)
+                bot.tree.copy_global_to(guild=guild)
+                await bot.tree.sync(guild=guild)
+                log.info(f"Synced commands to {guild.name} ({guild.id})")
+                await asyncio.sleep(2)  # Small delay to avoid rate limits
+            except Exception as e:
+                log.warning(f"Could not sync commands for {guild.name}: {e}")
+        _synced = True
+    else:
+        log.info("Reconnected — skipping command sync (already synced this session).")
 
     log.info(f"Ready! Serving {len(bot.guilds)} guild(s).")
 

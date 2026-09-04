@@ -82,7 +82,7 @@ class ConfigCog(commands.GroupCog, name="config"):
     )
     @app_commands.guild_only()
     async def config_get(self, interaction: discord.Interaction, key: app_commands.Choice[str]):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
 
         if not await _is_staff(interaction):
             return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
@@ -92,7 +92,7 @@ class ConfigCog(commands.GroupCog, name="config"):
         embed.add_field(name="Key", value=f"`{key.value}`", inline=True)
         embed.add_field(name="Value", value=f"`{value}`" if value else "*Not set*", inline=True)
         embed.add_field(name="Description", value=VALID_KEYS[key.value], inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="list", description="[Staff] List all config keys and values for this server")
     @app_commands.guild_only()
