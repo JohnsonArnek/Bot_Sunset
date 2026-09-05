@@ -427,9 +427,14 @@ async def get_all_lands(guild_id: int) -> list[dict]:
 
 
 async def delete_land(land_id: int):
-    """Delete a land by ID (cascades to members, requests, purchases)."""
+    """Delete a land by ID (cascades to members, requests, purchases, and rotation)."""
     async with DBConnection() as conn:
+        row = await conn.fetchone("SELECT guild_id FROM lands WHERE id = ?", (land_id,))
+        guild_id = row["guild_id"] if row else None
+        await conn.execute("DELETE FROM rotation_order WHERE land_id = ?", (land_id,))
         await conn.execute("DELETE FROM lands WHERE id = ?", (land_id,))
+    if guild_id:
+        await renumber_rotation(guild_id)
 
 
 # ── Member helpers ────────────────────────────────────────────────────
@@ -713,8 +718,28 @@ async def cancel_auction(auction_id: int):
 
 # ── Rotation helpers ──────────────────────────────────────────────────
 
+async def renumber_rotation(guild_id: int):
+    """Strictly cleans and renumbers all lands in the rotation to 1, 2, ..., N."""
+    async with DBConnection() as conn:
+        # Delete any rotation entries pointing to lands that don't exist anymore
+        await conn.execute(
+            "DELETE FROM rotation_order WHERE guild_id = ? AND land_id NOT IN (SELECT id FROM lands WHERE guild_id = ?)",
+            (guild_id, guild_id),
+        )
+        rows = await conn.fetchall(
+            "SELECT id FROM rotation_order WHERE guild_id = ? ORDER BY position ASC, id ASC",
+            (guild_id,),
+        )
+        for idx, r in enumerate(rows, start=1):
+            await conn.execute(
+                "UPDATE rotation_order SET position = ? WHERE id = ?",
+                (idx, r["id"]),
+            )
+
+
 async def get_rotation_order(guild_id: int) -> list[dict]:
-    """Get all lands in the rotation for this guild, ordered by position."""
+    """Get all lands in the rotation for this guild, ordered by position (auto-renumbered)."""
+    await renumber_rotation(guild_id)
     async with DBConnection() as conn:
         return await conn.fetchall(
             "SELECT r.*, l.name as land_name, l.owner_id, l.chunks FROM rotation_order r "
@@ -726,17 +751,18 @@ async def get_rotation_order(guild_id: int) -> list[dict]:
 async def add_to_rotation(guild_id: int, land_id: int, position: int = None):
     """Add a land to the rotation. If position is None, add to the end."""
     async with DBConnection() as conn:
-        if position is None:
+        if position is None or position < 1:
             row = await conn.fetchone(
                 "SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM rotation_order WHERE guild_id = ?",
                 (guild_id,),
             )
             position = row["next_pos"]
-        # Shift existing entries down to make room
-        await conn.execute(
-            "UPDATE rotation_order SET position = position + 1 WHERE guild_id = ? AND position >= ?",
-            (guild_id, position),
-        )
+        else:
+            # Shift existing entries down to make room
+            await conn.execute(
+                "UPDATE rotation_order SET position = position + 1 WHERE guild_id = ? AND position >= ?",
+                (guild_id, position),
+            )
         if IS_POSTGRES:
             await conn.execute(
                 "INSERT INTO rotation_order (guild_id, land_id, position) VALUES (?, ?, ?) "
@@ -748,32 +774,28 @@ async def add_to_rotation(guild_id: int, land_id: int, position: int = None):
                 "INSERT OR REPLACE INTO rotation_order (guild_id, land_id, position) VALUES (?, ?, ?)",
                 (guild_id, land_id, position),
             )
+    await renumber_rotation(guild_id)
 
 
 async def remove_from_rotation(guild_id: int, land_id: int) -> bool:
-    """Remove a land from the rotation. Returns True if it was found."""
+    """Remove a land from the rotation and auto-renumber remaining lands."""
     async with DBConnection() as conn:
         row = await conn.fetchone(
-            "SELECT position FROM rotation_order WHERE guild_id = ? AND land_id = ?",
+            "SELECT 1 FROM rotation_order WHERE guild_id = ? AND land_id = ?",
             (guild_id, land_id),
         )
         if not row:
             return False
-        pos = row["position"]
         await conn.execute(
             "DELETE FROM rotation_order WHERE guild_id = ? AND land_id = ?",
             (guild_id, land_id),
         )
-        # Shift remaining entries up
-        await conn.execute(
-            "UPDATE rotation_order SET position = position - 1 WHERE guild_id = ? AND position > ?",
-            (guild_id, pos),
-        )
-        return True
+    await renumber_rotation(guild_id)
+    return True
 
 
 async def move_to_bottom(guild_id: int, land_id: int):
-    """Move a land to the bottom of the rotation (highest position number)."""
+    """Move a land to the bottom of the rotation and renumber."""
     async with DBConnection() as conn:
         row = await conn.fetchone(
             "SELECT position FROM rotation_order WHERE guild_id = ? AND land_id = ?",
@@ -781,24 +803,16 @@ async def move_to_bottom(guild_id: int, land_id: int):
         )
         if not row:
             return
-        old_pos = row["position"]
         max_row = await conn.fetchone(
             "SELECT COALESCE(MAX(position), 0) as max_pos FROM rotation_order WHERE guild_id = ?",
             (guild_id,),
         )
         max_pos = max_row["max_pos"]
-        if old_pos == max_pos:
-            return  # Already at bottom
-        # Move everyone above down by 1
-        await conn.execute(
-            "UPDATE rotation_order SET position = position - 1 WHERE guild_id = ? AND position > ?",
-            (guild_id, old_pos),
-        )
-        # Move this land to the bottom
         await conn.execute(
             "UPDATE rotation_order SET position = ? WHERE guild_id = ? AND land_id = ?",
-            (max_pos, guild_id, land_id),
+            (max_pos + 1, guild_id, land_id),
         )
+    await renumber_rotation(guild_id)
 
 
 async def set_rotation_position(guild_id: int, land_id: int, new_position: int):

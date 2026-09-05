@@ -297,6 +297,8 @@ class LandCog(commands.GroupCog, name="land"):
         if not land:
             return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
 
+        # Remove from rotation first (renumbers remaining positions properly)
+        await db.remove_from_rotation(interaction.guild_id, land["id"])
         await db.delete_land(land["id"])
 
         embed = discord.Embed(title="🗑️ Land Deleted", colour=discord.Colour.red())
