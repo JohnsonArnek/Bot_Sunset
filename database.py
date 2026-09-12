@@ -404,6 +404,11 @@ async def update_land_chunks(land_id: int, new_chunks: int):
         await conn.execute("UPDATE lands SET chunks = ? WHERE id = ?", (new_chunks, land_id))
 
 
+async def update_land_owner(land_id: int, new_owner_id: int):
+    async with DBConnection() as conn:
+        await conn.execute("UPDATE lands SET owner_id = ? WHERE id = ?", (new_owner_id, land_id))
+
+
 async def get_land_for_user(guild_id: int, user_id: int) -> dict | None:
     """Get a land where the user is either owner or member in this guild."""
     land = await get_land_by_owner(guild_id, user_id)

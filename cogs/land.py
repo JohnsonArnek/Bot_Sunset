@@ -284,6 +284,42 @@ class LandCog(commands.GroupCog, name="land"):
         embed.set_footer(text=f"Adjusted by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="set_owner", description="[Staff/Owner] Change or transfer the leader/owner of a land")
+    @app_commands.describe(land_name="Name of the land", new_owner="Discord member who will be the new owner")
+    @app_commands.guild_only()
+    async def land_set_owner(self, interaction: discord.Interaction, land_name: str, new_owner: discord.Member):
+        await interaction.response.defer()
+
+        land = await db.get_land_by_name(interaction.guild_id, land_name)
+        if not land:
+            return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+
+        is_staff = await _is_staff(interaction)
+        if not is_staff and interaction.user.id != land["owner_id"]:
+            return await interaction.followup.send("🔒 Staff or current land owner only.", ephemeral=True)
+
+        if new_owner.id == land["owner_id"]:
+            return await interaction.followup.send(f"❌ {new_owner.mention} is already the owner of **{land['name']}**.", ephemeral=True)
+
+        existing = await db.get_land_by_owner(interaction.guild_id, new_owner.id)
+        if existing and existing["id"] != land["id"]:
+            return await interaction.followup.send(
+                f"❌ {new_owner.mention} already owns **{existing['name']}** on this server.", ephemeral=True
+            )
+
+        old_owner_id = land["owner_id"]
+        # If new owner was listed as a normal member, remove them from members list
+        await db.remove_member(land["id"], new_owner.id)
+        # Update land owner
+        await db.update_land_owner(land["id"], new_owner.id)
+
+        embed = discord.Embed(title="👑 Land Ownership Transferred", colour=discord.Colour.purple())
+        embed.add_field(name="Land", value=land["name"], inline=True)
+        embed.add_field(name="Previous Owner", value=f"<@{old_owner_id}>", inline=True)
+        embed.add_field(name="New Owner", value=new_owner.mention, inline=True)
+        embed.set_footer(text=f"Transferred by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
     @app_commands.command(name="delete", description="[Staff] Delete a registered land")
     @app_commands.describe(land_name="Name of the land to delete")
     @app_commands.guild_only()
