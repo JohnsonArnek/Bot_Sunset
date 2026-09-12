@@ -80,6 +80,11 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 if mode != "rotation":
                     continue
 
+                # Is rotation paused?
+                paused = await db.get_config(guild.id, "rotation_paused")
+                if paused == "true":
+                    continue
+
                 # Already ran today?
                 last = await db.get_last_rotation_date(guild.id)
                 if last == today_str:
@@ -306,10 +311,12 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 f"{entry['chunks']} chunks, {price} ems — <@{entry['owner_id']}>{officer_str}"
             )
 
+        paused = await db.get_config(interaction.guild_id, "rotation_paused")
+        status_tag = " ⏸️ [PAUSED]" if paused == "true" else ""
         embed = discord.Embed(
-            title="🔄 Rotation Order",
+            title=f"🔄 Rotation Order{status_tag}",
             description="\n".join(lines),
-            colour=discord.Colour.blue(),
+            colour=discord.Colour.orange() if paused == "true" else discord.Colour.blue(),
         )
         last = await db.get_last_rotation_date(interaction.guild_id)
         if last:
@@ -457,6 +464,75 @@ class RotationCog(commands.GroupCog, name="rotation"):
     @app_commands.guild_only()
     async def rotation_end(self, interaction: discord.Interaction):
         await self.rotation_cancel.callback(self, interaction)
+
+    @app_commands.command(name="pause", description="[Staff] Pause the daily rotation system and stop any active selection")
+    @app_commands.guild_only()
+    async def rotation_pause(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        await db.set_config(interaction.guild_id, "rotation_paused", "true")
+
+        # Stop active cascade task if running
+        task = self._cascade_tasks.get(interaction.guild_id)
+        has_task = task and not task.done()
+        if has_task:
+            task.cancel()
+
+        pending = await db.get_pending_rotation_offer(interaction.guild_id)
+        if pending:
+            await db.update_rotation_offer(pending["id"], "paused")
+
+        channel = await _get_rotation_channel(interaction.guild)
+        if channel:
+            if pending and pending.get("message_id"):
+                try:
+                    msg = await channel.fetch_message(pending["message_id"])
+                    await msg.clear_reactions()
+                except Exception:
+                    pass
+
+            embed = discord.Embed(
+                title="⏸️ Daily Rotation Paused",
+                description=(
+                    f"The daily rotation has been **paused** by staff ({interaction.user.mention}).\n"
+                    f"Any active selection has been stopped, and automatic daily runs are halted.\n"
+                    f"Use `/rotation resume` when ready to unpause."
+                ),
+                colour=discord.Colour.orange(),
+            )
+            await channel.send(embed=embed)
+
+        await interaction.followup.send("⏸️ Daily rotation paused and active selections stopped.", ephemeral=True)
+
+    @app_commands.command(name="resume", description="[Staff] Resume the daily rotation system")
+    @app_commands.describe(trigger_now="Start a rotation round right now (default: False)")
+    @app_commands.guild_only()
+    async def rotation_resume(self, interaction: discord.Interaction, trigger_now: bool = False):
+        await interaction.response.defer(ephemeral=True)
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        await db.set_config(interaction.guild_id, "rotation_paused", "false")
+
+        channel = await _get_rotation_channel(interaction.guild)
+        if channel:
+            embed = discord.Embed(
+                title="▶️ Daily Rotation Resumed",
+                description=(
+                    f"The daily rotation has been **resumed** by staff ({interaction.user.mention}).\n"
+                    f"Automatic daily turn distribution is now active."
+                ),
+                colour=discord.Colour.green(),
+            )
+            await channel.send(embed=embed)
+
+        if trigger_now:
+            await interaction.followup.send("▶️ Daily rotation resumed. Starting a round now...", ephemeral=True)
+            await self._start_rotation(interaction.guild)
+        else:
+            await interaction.followup.send("▶️ Daily rotation resumed. It will trigger at the next scheduled time.", ephemeral=True)
 
     @app_commands.command(name="trigger", description="[Staff] Manually trigger today's rotation now")
     @app_commands.guild_only()

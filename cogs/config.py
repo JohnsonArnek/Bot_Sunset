@@ -29,6 +29,7 @@ VALID_KEYS = {
     "rotation_timeout_minutes": "Minutes to wait for reaction before auto-skip (default 720 = 12h)",
     "rotation_channel_id": "Channel ID for rotation messages (default: first writable channel)",
     "rotation_daily_blocks": "Blocks generated per daily rotation (default 1)",
+    "rotation_paused": "Whether daily rotation is paused ('true' or 'false', default false)",
 }
 
 
