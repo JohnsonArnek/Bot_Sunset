@@ -97,7 +97,8 @@ class SunsetCog(commands.GroupCog, name="sunset"):
                 "• `/rotation add <land> [position]` — 🔒 Add a land to the rotation.\n"
                 "• `/rotation remove <land>` — 🔒 Remove a land from rotation.\n"
                 "• `/rotation move <land> <position>` — 🔒 Reorder a land.\n"
-                "• `/rotation skip` — 🔒 Skip the current pending offer.\n"
+                "• `/rotation skip` — 🔒 Skip current land and offer to next in line.\n"
+                "• `/rotation cancel` — 🔒 End/cancel today's rotation selection.\n"
                 "• `/rotation trigger` — 🔒 Manually start today's rotation."
             ),
             inline=False,

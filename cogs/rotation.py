@@ -57,6 +57,7 @@ class RotationCog(commands.GroupCog, name="rotation"):
         super().__init__()
         # Track active cascade tasks per guild so we don't run multiples
         self._cascade_tasks: dict[int, asyncio.Task] = {}
+        self._skip_events: dict[int, asyncio.Event] = {}
 
     async def cog_load(self):
         self.rotation_loop.start()
@@ -133,102 +134,119 @@ class RotationCog(commands.GroupCog, name="rotation"):
         timeout_minutes = int(await db.get_config(guild.id, "rotation_timeout_minutes") or "720")
         daily_blocks = int(await db.get_config(guild.id, "rotation_daily_blocks") or "1")
 
-        for i in range(start_idx, len(order)):
-            entry = order[i]
-            land_id = entry["land_id"]
-            land_name = entry["land_name"]
-            owner_id = entry["owner_id"]
-            officer_ids = await db.get_officers(land_id)
-            chunks = entry["chunks"]
-            price = models.block_price(chunks, full_block_cost)
-            tier_label = models.price_tier_label(chunks, full_block_cost)
+        skip_event = asyncio.Event()
+        self._skip_events[guild.id] = skip_event
 
-            # Mention owner + any officers
-            pings = [f"<@{owner_id}>"] + [f"<@{uid}>" for uid in officer_ids]
-            pings_content = " ".join(pings)
+        try:
+            for i in range(start_idx, len(order)):
+                skip_event.clear()
+                entry = order[i]
+                land_id = entry["land_id"]
+                land_name = entry["land_name"]
+                owner_id = entry["owner_id"]
+                officer_ids = await db.get_officers(land_id)
+                chunks = entry["chunks"]
+                price = models.block_price(chunks, full_block_cost)
+                tier_label = models.price_tier_label(chunks, full_block_cost)
 
-            # Build the offer embed
-            embed = discord.Embed(
-                title="🔄 Daily Rotation — Claim Block Offer",
+                # Mention owner + any officers
+                pings = [f"<@{owner_id}>"] + [f"<@{uid}>" for uid in officer_ids]
+                pings_content = " ".join(pings)
+
+                # Build the offer embed
+                embed = discord.Embed(
+                    title="🔄 Daily Rotation — Claim Block Offer",
+                    description=(
+                        f"**{land_name}**, it's your turn!\n\n"
+                        f"You have **{daily_blocks}** claim block(s) available today.\n"
+                        f"Current chunks: **{chunks}** — Price: **{price} ems** ({tier_label})\n\n"
+                        f"React {ACCEPT_EMOJI} to **accept** or {PASS_EMOJI} to **pass**.\n"
+                        f"⏰ You have **{timeout_minutes} minutes** to respond."
+                    ),
+                    colour=discord.Colour.gold(),
+                )
+                embed.set_footer(text=f"Position #{i + 1} of {len(order)} in rotation")
+
+                # Send the offer and ping the owner and officers
+                msg = await channel.send(content=pings_content, embed=embed)
+                await msg.add_reaction(ACCEPT_EMOJI)
+                await msg.add_reaction(PASS_EMOJI)
+
+                # Record the offer in the DB
+                offer_id = await db.create_rotation_offer(guild.id, land_id, msg.id)
+
+                # Allowed to respond: owner + officers
+                allowed_uids = {owner_id, *officer_ids}
+
+                # Wait for reaction or staff skip
+                result, reactor_id = await self._wait_for_reaction(msg, allowed_uids, timeout_minutes * 60, skip_event)
+
+                if result == "accept":
+                    # Process the purchase
+                    for _ in range(daily_blocks):
+                        chunks += 1
+                        await db.update_land_chunks(land_id, chunks)
+                        await db.record_purchase(land_id, "rotation", price)
+
+                    await db.update_rotation_offer(offer_id, "accepted")
+                    await db.move_to_bottom(guild.id, land_id)
+
+                    reactor_str = f" (via <@{reactor_id}>)" if reactor_id else ""
+                    confirm_embed = discord.Embed(
+                        title="✅ Block Claimed!",
+                        description=(
+                            f"**{land_name}** accepted the offer{reactor_str}.\n"
+                            f"• +{daily_blocks} block(s) → now **{chunks}** chunks\n"
+                            f"• Price: **{price} ems** per block\n"
+                            f"• **{land_name}** moves to the bottom of the rotation."
+                        ),
+                        colour=discord.Colour.green(),
+                    )
+                    await channel.send(embed=confirm_embed)
+                    return  # Done for today
+
+                elif result == "skip":
+                    await db.update_rotation_offer(offer_id, "skipped")
+                    skip_embed = discord.Embed(
+                        description=f"⏭️ **{land_name}**'s turn was skipped by staff. Offering to the next settlement...",
+                        colour=discord.Colour.light_grey(),
+                    )
+                    await channel.send(embed=skip_embed)
+
+                else:
+                    # Pass or timeout — mark and continue to next
+                    await db.update_rotation_offer(offer_id, "passed" if result == "pass" else "timeout")
+                    reactor_str = f" (via <@{reactor_id}>)" if reactor_id and result == "pass" else ""
+                    skip_embed = discord.Embed(
+                        description=(
+                            f"{'❌' if result == 'pass' else '⏰'} "
+                            f"**{land_name}** {'passed' + reactor_str if result == 'pass' else 'timed out'}. "
+                            f"Offering to the next settlement..."
+                        ),
+                        colour=discord.Colour.light_grey(),
+                    )
+                    await channel.send(embed=skip_embed)
+
+            # Everyone passed — add block to leftover pool
+            await db.add_leftover_blocks(guild.id, daily_blocks)
+            no_claim_embed = discord.Embed(
+                title="📭 No One Claimed Today's Block",
                 description=(
-                    f"**{land_name}**, it's your turn!\n\n"
-                    f"You have **{daily_blocks}** claim block(s) available today.\n"
-                    f"Current chunks: **{chunks}** — Price: **{price} ems** ({tier_label})\n\n"
-                    f"React {ACCEPT_EMOJI} to **accept** or {PASS_EMOJI} to **pass**.\n"
-                    f"⏰ You have **{timeout_minutes} minutes** to respond."
+                    f"All {len(order)} settlements passed or timed out.\n"
+                    f"**{daily_blocks}** block(s) added to the Leftover Pool."
                 ),
-                colour=discord.Colour.gold(),
+                colour=discord.Colour.dark_grey(),
             )
-            embed.set_footer(text=f"Position #{i + 1} of {len(order)} in rotation")
+            await channel.send(embed=no_claim_embed)
 
-            # Send the offer and ping the owner and officers
-            msg = await channel.send(content=pings_content, embed=embed)
-            await msg.add_reaction(ACCEPT_EMOJI)
-            await msg.add_reaction(PASS_EMOJI)
-
-            # Record the offer in the DB
-            offer_id = await db.create_rotation_offer(guild.id, land_id, msg.id)
-
-            # Allowed to respond: owner + officers
-            allowed_uids = {owner_id, *officer_ids}
-
-            # Wait for reaction
-            result, reactor_id = await self._wait_for_reaction(msg, allowed_uids, timeout_minutes * 60)
-
-            if result == "accept":
-                # Process the purchase
-                for _ in range(daily_blocks):
-                    chunks += 1
-                    await db.update_land_chunks(land_id, chunks)
-                    await db.record_purchase(land_id, "rotation", price)
-
-                await db.update_rotation_offer(offer_id, "accepted")
-                await db.move_to_bottom(guild.id, land_id)
-
-                reactor_str = f" (via <@{reactor_id}>)" if reactor_id else ""
-                confirm_embed = discord.Embed(
-                    title="✅ Block Claimed!",
-                    description=(
-                        f"**{land_name}** accepted the offer{reactor_str}.\n"
-                        f"• +{daily_blocks} block(s) → now **{chunks}** chunks\n"
-                        f"• Price: **{price} ems** per block\n"
-                        f"• **{land_name}** moves to the bottom of the rotation."
-                    ),
-                    colour=discord.Colour.green(),
-                )
-                await channel.send(embed=confirm_embed)
-                return  # Done for today
-
-            else:
-                # Pass or timeout — mark and continue to next
-                await db.update_rotation_offer(offer_id, "passed" if result == "pass" else "timeout")
-                reactor_str = f" (via <@{reactor_id}>)" if reactor_id and result == "pass" else ""
-                skip_embed = discord.Embed(
-                    description=(
-                        f"{'❌' if result == 'pass' else '⏰'} "
-                        f"**{land_name}** {'passed' + reactor_str if result == 'pass' else 'timed out'}. "
-                        f"Offering to the next settlement..."
-                    ),
-                    colour=discord.Colour.light_grey(),
-                )
-                await channel.send(embed=skip_embed)
-
-        # Everyone passed — add block to leftover pool
-        await db.add_leftover_blocks(guild.id, daily_blocks)
-        no_claim_embed = discord.Embed(
-            title="📭 No One Claimed Today's Block",
-            description=(
-                f"All {len(order)} settlements passed or timed out.\n"
-                f"**{daily_blocks}** block(s) added to the Leftover Pool."
-            ),
-            colour=discord.Colour.dark_grey(),
-        )
-        await channel.send(embed=no_claim_embed)
+        except asyncio.CancelledError:
+            log.info(f"[{guild.name}] Rotation cascade cancelled.")
+            raise
 
     async def _wait_for_reaction(
-        self, message: discord.Message, allowed_uids: set[int], timeout_seconds: float
+        self, message: discord.Message, allowed_uids: set[int], timeout_seconds: float, skip_event: asyncio.Event = None
     ) -> tuple[str, int | None]:
-        """Wait for the owner or an officer to react. Returns ('accept'|'pass'|'timeout', user_id)."""
+        """Wait for the owner or an officer to react, or staff to skip."""
         def check(payload: discord.RawReactionActionEvent):
             return (
                 payload.message_id == message.id
@@ -236,16 +254,34 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 and str(payload.emoji) in (ACCEPT_EMOJI, PASS_EMOJI)
             )
 
-        try:
-            payload = await self.bot.wait_for(
-                "raw_reaction_add", check=check, timeout=timeout_seconds
-            )
-            if str(payload.emoji) == ACCEPT_EMOJI:
-                return "accept", payload.user_id
-            else:
-                return "pass", payload.user_id
-        except asyncio.TimeoutError:
+        reaction_task = asyncio.create_task(self.bot.wait_for("raw_reaction_add", check=check))
+        tasks = [reaction_task]
+        skip_task = None
+        if skip_event:
+            skip_task = asyncio.create_task(skip_event.wait())
+            tasks.append(skip_task)
+
+        done, pending = await asyncio.wait(tasks, timeout=timeout_seconds, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+
+        if not done:
             return "timeout", None
+
+        if skip_task and skip_task in done:
+            return "skip", None
+
+        if reaction_task in done:
+            try:
+                payload = reaction_task.result()
+                if str(payload.emoji) == ACCEPT_EMOJI:
+                    return "accept", payload.user_id
+                else:
+                    return "pass", payload.user_id
+            except Exception:
+                return "timeout", None
+
+        return "timeout", None
 
     # ── Slash commands ────────────────────────────────────────────────
 
@@ -353,7 +389,7 @@ class RotationCog(commands.GroupCog, name="rotation"):
             f"✅ **{land['name']}** moved to position **#{position}**.", ephemeral=True
         )
 
-    @app_commands.command(name="skip", description="[Staff] Skip the current pending offer")
+    @app_commands.command(name="skip", description="[Staff] Skip the current land's turn and offer to the next in line")
     @app_commands.guild_only()
     async def rotation_skip(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -361,21 +397,66 @@ class RotationCog(commands.GroupCog, name="rotation"):
             return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
 
         pending = await db.get_pending_rotation_offer(interaction.guild_id)
+        skip_event = self._skip_events.get(interaction.guild_id)
+
         if not pending:
-            return await interaction.followup.send("📭 No pending rotation offer to skip.", ephemeral=True)
+            return await interaction.followup.send("📭 No active pending rotation offer to skip.", ephemeral=True)
 
-        await db.update_rotation_offer(pending["id"], "skipped")
-
-        # Cancel the active cascade task if running
-        task = self._cascade_tasks.get(interaction.guild_id)
-        if task and not task.done():
-            task.cancel()
+        if skip_event:
+            skip_event.set()
+        else:
+            await db.update_rotation_offer(pending["id"], "skipped")
 
         await interaction.followup.send(
-            f"⏭️ Skipped offer to **{pending['land_name']}**. "
-            f"Use `/rotation trigger` to re-run today's rotation.",
+            f"⏭️ Skipped offer for **{pending['land_name']}**. Offering to the next settlement in line...",
             ephemeral=True,
         )
+
+    @app_commands.command(name="cancel", description="[Staff] End and cancel the active rotation selection for today")
+    @app_commands.guild_only()
+    async def rotation_cancel(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+
+        task = self._cascade_tasks.get(interaction.guild_id)
+        has_task = task and not task.done()
+        pending = await db.get_pending_rotation_offer(interaction.guild_id)
+
+        if not has_task and not pending:
+            return await interaction.followup.send("📭 No active rotation selection is running.", ephemeral=True)
+
+        if has_task:
+            task.cancel()
+
+        if pending:
+            await db.update_rotation_offer(pending["id"], "cancelled")
+
+        channel = await _get_rotation_channel(interaction.guild)
+        if channel:
+            if pending and pending.get("message_id"):
+                try:
+                    msg = await channel.fetch_message(pending["message_id"])
+                    await msg.clear_reactions()
+                except Exception:
+                    pass
+
+            cancel_embed = discord.Embed(
+                title="🛑 Rotation Selection Ended",
+                description=(
+                    f"Today's rotation selection was cancelled by staff ({interaction.user.mention}).\n"
+                    f"No further offers will be sent today unless `/rotation trigger` is run."
+                ),
+                colour=discord.Colour.red(),
+            )
+            await channel.send(embed=cancel_embed)
+
+        await interaction.followup.send("🛑 Active rotation selection ended and cancelled.", ephemeral=True)
+
+    @app_commands.command(name="end", description="[Staff] End and cancel the active rotation selection for today")
+    @app_commands.guild_only()
+    async def rotation_end(self, interaction: discord.Interaction):
+        await self.rotation_cancel.callback(self, interaction)
 
     @app_commands.command(name="trigger", description="[Staff] Manually trigger today's rotation now")
     @app_commands.guild_only()
