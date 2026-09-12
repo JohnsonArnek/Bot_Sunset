@@ -26,6 +26,8 @@ class SunsetCog(commands.GroupCog, name="sunset"):
             value=(
                 "• `/land create <name> <owner> [chunks]` — [Staff] Create a new land.\n"
                 "• `/land set_owner <name> <new_owner>` — [Staff/Owner] Change or transfer land leader.\n"
+                "• `/land officer_add <user> [land]` — [Staff/Owner] Appoint an officer (can act on turns).\n"
+                "• `/land officer_remove <user> [land]` — [Staff/Owner] Remove an officer.\n"
                 "• `/land delete <name>` — [Staff] Delete a registered land.\n"
                 "• `/land info [name]` — View detailed info, price tier, queue position.\n"
                 "• `/land list` — List all registered lands, their owners, chunks, and members.\n"

@@ -89,9 +89,13 @@ class LandCog(commands.GroupCog, name="land"):
         weekly_status = "✅ Available" if not weekly else "🔒 Used this week"
 
         member_mentions = [f"<@{uid}>" for uid in members_list]
+        officers_list = await db.get_officers(land["id"])
+        officer_mentions = [f"<@{uid}>" for uid in officers_list]
 
         embed = discord.Embed(title=f"🏰 {land['name']}", colour=discord.Colour.teal())
         embed.add_field(name="👑 Owner", value=f"<@{land['owner_id']}>", inline=True)
+        if officer_mentions:
+            embed.add_field(name="🛡️ Officers", value=", ".join(officer_mentions), inline=True)
         embed.add_field(name="📊 Chunks", value=str(land["chunks"]), inline=True)
         embed.add_field(name="👥 Members", value=str(member_count), inline=True)
         embed.add_field(name="💰 Price Tier", value=tier, inline=True)
@@ -124,10 +128,12 @@ class LandCog(commands.GroupCog, name="land"):
 
         for land in lands[:25]:  # Discord embed limit
             member_count = await db.get_member_count(land["id"])
+            officer_ids = await db.get_officers(land["id"])
+            officer_str = f"\n🛡️ **Officers:** {', '.join(f'<@{uid}>' for uid in officer_ids)}" if officer_ids else ""
             embed.add_field(
                 name=f"🏰 {land['name']}",
                 value=(
-                    f"👑 **Owner:** <@{land['owner_id']}>\n"
+                    f"👑 **Owner:** <@{land['owner_id']}>{officer_str}\n"
                     f"📊 **Chunks:** {land['chunks']}  •  👥 **Members:** {member_count}"
                 ),
                 inline=False,
@@ -192,10 +198,76 @@ class LandCog(commands.GroupCog, name="land"):
         if not removed:
             return await interaction.followup.send(
                 f"❌ {user.mention} is not in **{land['name']}**.", ephemeral=True)
+        # Also remove officer designation if they were an officer
+        await db.remove_officer(land["id"], user.id)
         count = await db.get_member_count(land["id"])
         embed = discord.Embed(title="👥 Member Removed", colour=discord.Colour.orange(),
                               description=f"{user.mention} removed from **{land['name']}**.")
         embed.add_field(name="Members Remaining", value=str(count))
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="officer_add", description="Designate an officer for a land (Staff can specify land_name)")
+    @app_commands.describe(user="The user to appoint as officer", land_name="Target land name (Staff only; default: your land)")
+    @app_commands.guild_only()
+    async def officer_add(self, interaction: discord.Interaction, user: discord.Member, land_name: str = None):
+        await interaction.response.defer()
+
+        if land_name:
+            if not await _is_staff(interaction):
+                return await interaction.followup.send("🔒 Only staff can specify a land_name for other lands.", ephemeral=True)
+            land = await db.get_land_by_name(interaction.guild_id, land_name)
+            if not land:
+                return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+        else:
+            land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
+            if not land:
+                return await interaction.followup.send("❌ You must be a land owner on this server (or specify land_name if Staff).", ephemeral=True)
+
+        if user.id == land["owner_id"]:
+            return await interaction.followup.send(f"❌ {user.mention} is already the owner of **{land['name']}**.", ephemeral=True)
+
+        if await db.is_officer(land["id"], user.id):
+            return await interaction.followup.send(f"❌ {user.mention} is already an officer of **{land['name']}**.", ephemeral=True)
+
+        # Ensure user is also added as a member of this land
+        await db.add_member(land["id"], user.id)
+        await db.add_officer(land["id"], user.id)
+
+        embed = discord.Embed(
+            title="🛡️ Officer Appointed",
+            description=f"{user.mention} is now an officer of **{land['name']}**!\nThey will be pinged alongside the owner for turn offers and can confirm claims.",
+            colour=discord.Colour.blue(),
+        )
+        embed.set_footer(text=f"Appointed by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="officer_remove", description="Remove an officer from a land (Staff can specify land_name)")
+    @app_commands.describe(user="The officer to remove", land_name="Target land name (Staff only; default: your land)")
+    @app_commands.guild_only()
+    async def officer_remove(self, interaction: discord.Interaction, user: discord.Member, land_name: str = None):
+        await interaction.response.defer()
+
+        if land_name:
+            if not await _is_staff(interaction):
+                return await interaction.followup.send("🔒 Only staff can specify a land_name for other lands.", ephemeral=True)
+            land = await db.get_land_by_name(interaction.guild_id, land_name)
+            if not land:
+                return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+        else:
+            land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
+            if not land:
+                return await interaction.followup.send("❌ You must be a land owner on this server (or specify land_name if Staff).", ephemeral=True)
+
+        removed = await db.remove_officer(land["id"], user.id)
+        if not removed:
+            return await interaction.followup.send(f"❌ {user.mention} is not an officer of **{land['name']}**.", ephemeral=True)
+
+        embed = discord.Embed(
+            title="🛡️ Officer Removed",
+            description=f"{user.mention} is no longer an officer of **{land['name']}**.",
+            colour=discord.Colour.orange(),
+        )
+        embed.set_footer(text=f"Removed by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="set_chunks", description="[Staff] Set a land's chunk count manually")

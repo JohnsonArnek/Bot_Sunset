@@ -138,9 +138,14 @@ class RotationCog(commands.GroupCog, name="rotation"):
             land_id = entry["land_id"]
             land_name = entry["land_name"]
             owner_id = entry["owner_id"]
+            officer_ids = await db.get_officers(land_id)
             chunks = entry["chunks"]
             price = models.block_price(chunks, full_block_cost)
             tier_label = models.price_tier_label(chunks, full_block_cost)
+
+            # Mention owner + any officers
+            pings = [f"<@{owner_id}>"] + [f"<@{uid}>" for uid in officer_ids]
+            pings_content = " ".join(pings)
 
             # Build the offer embed
             embed = discord.Embed(
@@ -156,16 +161,19 @@ class RotationCog(commands.GroupCog, name="rotation"):
             )
             embed.set_footer(text=f"Position #{i + 1} of {len(order)} in rotation")
 
-            # Send the offer and ping the owner
-            msg = await channel.send(content=f"<@{owner_id}>", embed=embed)
+            # Send the offer and ping the owner and officers
+            msg = await channel.send(content=pings_content, embed=embed)
             await msg.add_reaction(ACCEPT_EMOJI)
             await msg.add_reaction(PASS_EMOJI)
 
             # Record the offer in the DB
             offer_id = await db.create_rotation_offer(guild.id, land_id, msg.id)
 
-            # Wait for the owner's reaction
-            result = await self._wait_for_reaction(msg, owner_id, timeout_minutes * 60)
+            # Allowed to respond: owner + officers
+            allowed_uids = {owner_id, *officer_ids}
+
+            # Wait for reaction
+            result, reactor_id = await self._wait_for_reaction(msg, allowed_uids, timeout_minutes * 60)
 
             if result == "accept":
                 # Process the purchase
@@ -177,10 +185,11 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 await db.update_rotation_offer(offer_id, "accepted")
                 await db.move_to_bottom(guild.id, land_id)
 
+                reactor_str = f" (via <@{reactor_id}>)" if reactor_id else ""
                 confirm_embed = discord.Embed(
                     title="✅ Block Claimed!",
                     description=(
-                        f"**{land_name}** accepted the offer.\n"
+                        f"**{land_name}** accepted the offer{reactor_str}.\n"
                         f"• +{daily_blocks} block(s) → now **{chunks}** chunks\n"
                         f"• Price: **{price} ems** per block\n"
                         f"• **{land_name}** moves to the bottom of the rotation."
@@ -193,10 +202,11 @@ class RotationCog(commands.GroupCog, name="rotation"):
             else:
                 # Pass or timeout — mark and continue to next
                 await db.update_rotation_offer(offer_id, "passed" if result == "pass" else "timeout")
+                reactor_str = f" (via <@{reactor_id}>)" if reactor_id and result == "pass" else ""
                 skip_embed = discord.Embed(
                     description=(
                         f"{'❌' if result == 'pass' else '⏰'} "
-                        f"**{land_name}** {'passed' if result == 'pass' else 'timed out'}. "
+                        f"**{land_name}** {'passed' + reactor_str if result == 'pass' else 'timed out'}. "
                         f"Offering to the next settlement..."
                     ),
                     colour=discord.Colour.light_grey(),
@@ -216,13 +226,13 @@ class RotationCog(commands.GroupCog, name="rotation"):
         await channel.send(embed=no_claim_embed)
 
     async def _wait_for_reaction(
-        self, message: discord.Message, owner_id: int, timeout_seconds: float
-    ) -> str:
-        """Wait for the owner to react. Returns 'accept', 'pass', or 'timeout'."""
+        self, message: discord.Message, allowed_uids: set[int], timeout_seconds: float
+    ) -> tuple[str, int | None]:
+        """Wait for the owner or an officer to react. Returns ('accept'|'pass'|'timeout', user_id)."""
         def check(payload: discord.RawReactionActionEvent):
             return (
                 payload.message_id == message.id
-                and payload.user_id == owner_id
+                and payload.user_id in allowed_uids
                 and str(payload.emoji) in (ACCEPT_EMOJI, PASS_EMOJI)
             )
 
@@ -231,11 +241,11 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 "raw_reaction_add", check=check, timeout=timeout_seconds
             )
             if str(payload.emoji) == ACCEPT_EMOJI:
-                return "accept"
+                return "accept", payload.user_id
             else:
-                return "pass"
+                return "pass", payload.user_id
         except asyncio.TimeoutError:
-            return "timeout"
+            return "timeout", None
 
     # ── Slash commands ────────────────────────────────────────────────
 
@@ -253,9 +263,11 @@ class RotationCog(commands.GroupCog, name="rotation"):
         lines = []
         for entry in order:
             price = models.block_price(entry["chunks"], full_block_cost)
+            officer_ids = await db.get_officers(entry["land_id"])
+            officer_str = f" (Officers: {', '.join(f'<@{uid}>' for uid in officer_ids)})" if officer_ids else ""
             lines.append(
                 f"**{entry['position']}.** {entry['land_name']} — "
-                f"{entry['chunks']} chunks, {price} ems — <@{entry['owner_id']}>"
+                f"{entry['chunks']} chunks, {price} ems — <@{entry['owner_id']}>{officer_str}"
             )
 
         embed = discord.Embed(

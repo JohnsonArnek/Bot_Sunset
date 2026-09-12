@@ -207,6 +207,13 @@ async def init_db():
                     offered_at  TEXT    NOT NULL,
                     resolved_at TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS officers (
+                    id       SERIAL PRIMARY KEY,
+                    land_id  INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    user_id  BIGINT  NOT NULL,
+                    UNIQUE(land_id, user_id)
+                );
                 """
             )
 
@@ -312,6 +319,13 @@ async def init_db():
                     offered_at  TEXT    NOT NULL,
                     resolved_at TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS officers (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    land_id  INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    user_id  INTEGER NOT NULL,
+                    UNIQUE(land_id, user_id)
+                );
                 """
             )
             # Soft migrations
@@ -407,6 +421,7 @@ async def update_land_chunks(land_id: int, new_chunks: int):
 async def update_land_owner(land_id: int, new_owner_id: int):
     async with DBConnection() as conn:
         await conn.execute("UPDATE lands SET owner_id = ? WHERE id = ?", (new_owner_id, land_id))
+        await conn.execute("DELETE FROM officers WHERE land_id = ? AND user_id = ?", (land_id, new_owner_id))
 
 
 async def get_land_for_user(guild_id: int, user_id: int) -> dict | None:
@@ -432,10 +447,11 @@ async def get_all_lands(guild_id: int) -> list[dict]:
 
 
 async def delete_land(land_id: int):
-    """Delete a land by ID (cascades to members, requests, purchases, and rotation)."""
+    """Delete a land by ID (cascades to members, requests, purchases, officers, and rotation)."""
     async with DBConnection() as conn:
         row = await conn.fetchone("SELECT guild_id FROM lands WHERE id = ?", (land_id,))
         guild_id = row["guild_id"] if row else None
+        await conn.execute("DELETE FROM officers WHERE land_id = ?", (land_id,))
         await conn.execute("DELETE FROM rotation_order WHERE land_id = ?", (land_id,))
         await conn.execute("DELETE FROM lands WHERE id = ?", (land_id,))
     if guild_id:
@@ -485,6 +501,47 @@ async def get_members(land_id: int) -> list[int]:
     async with DBConnection() as conn:
         rows = await conn.fetchall("SELECT user_id FROM members WHERE land_id = ?", (land_id,))
         return [r["user_id"] for r in rows]
+
+
+# ── Officer helpers ───────────────────────────────────────────────────
+
+async def add_officer(land_id: int, user_id: int):
+    """Designate a member as an officer of a land."""
+    async with DBConnection() as conn:
+        if IS_POSTGRES:
+            await conn.execute(
+                "INSERT INTO officers (land_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                (land_id, user_id),
+            )
+        else:
+            await conn.execute(
+                "INSERT OR IGNORE INTO officers (land_id, user_id) VALUES (?, ?)",
+                (land_id, user_id),
+            )
+
+
+async def remove_officer(land_id: int, user_id: int) -> bool:
+    """Remove an officer designation."""
+    async with DBConnection() as conn:
+        row = await conn.fetchone("SELECT 1 FROM officers WHERE land_id = ? AND user_id = ?", (land_id, user_id))
+        if not row:
+            return False
+        await conn.execute("DELETE FROM officers WHERE land_id = ? AND user_id = ?", (land_id, user_id))
+        return True
+
+
+async def get_officers(land_id: int) -> list[int]:
+    """Get all officer user IDs for a land."""
+    async with DBConnection() as conn:
+        rows = await conn.fetchall("SELECT user_id FROM officers WHERE land_id = ?", (land_id,))
+        return [r["user_id"] for r in rows]
+
+
+async def is_officer(land_id: int, user_id: int) -> bool:
+    """Check if a user is an officer of a land."""
+    async with DBConnection() as conn:
+        row = await conn.fetchone("SELECT 1 FROM officers WHERE land_id = ? AND user_id = ?", (land_id, user_id))
+        return row is not None
 
 
 # ── Claim request helpers ─────────────────────────────────────────────
