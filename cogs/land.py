@@ -241,6 +241,11 @@ class LandCog(commands.GroupCog, name="land"):
         embed.set_footer(text=f"Appointed by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
+        # Refresh live rotation reactors so the new officer can react immediately
+        rotation_cog = self.bot.get_cog("rotation")
+        if rotation_cog:
+            await rotation_cog.refresh_allowed_reactors(interaction.guild_id)
+
     @app_commands.command(name="officer_remove", description="Remove an officer from a land (Staff can specify land_name)")
     @app_commands.describe(user="The officer to remove", land_name="Target land name (Staff only; default: your land)")
     @app_commands.guild_only()
@@ -269,6 +274,11 @@ class LandCog(commands.GroupCog, name="land"):
         )
         embed.set_footer(text=f"Removed by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
+
+        # Refresh live rotation reactors so the removed officer can no longer react
+        rotation_cog = self.bot.get_cog("rotation")
+        if rotation_cog:
+            await rotation_cog.refresh_allowed_reactors(interaction.guild_id)
 
     @app_commands.command(name="set_chunks", description="[Staff] Set a land's chunk count manually")
     @app_commands.describe(land_name="Name of the land", chunks="New chunk count")

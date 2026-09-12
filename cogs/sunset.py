@@ -101,6 +101,7 @@ class SunsetCog(commands.GroupCog, name="sunset"):
                 "• `/rotation cancel` — 🔒 End/cancel today's rotation selection.\n"
                 "• `/rotation pause` — 🔒 Pause daily rotation and stop active selection.\n"
                 "• `/rotation resume [trigger_now]` — 🔒 Resume daily rotation.\n"
+                "• `/rotation reping` — 🔒 Re-send current offer with updated leaders/officers.\n"
                 "• `/rotation trigger` — 🔒 Manually start today's rotation."
             ),
             inline=False,

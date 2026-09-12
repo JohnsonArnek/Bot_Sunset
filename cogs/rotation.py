@@ -58,6 +58,7 @@ class RotationCog(commands.GroupCog, name="rotation"):
         # Track active cascade tasks per guild so we don't run multiples
         self._cascade_tasks: dict[int, asyncio.Task] = {}
         self._skip_events: dict[int, asyncio.Event] = {}
+        self._allowed_reactors: dict[int, set[int]] = {}
 
     async def cog_load(self):
         self.rotation_loop.start()
@@ -147,12 +148,18 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 skip_event.clear()
                 entry = order[i]
                 land_id = entry["land_id"]
-                land_name = entry["land_name"]
-                owner_id = entry["owner_id"]
+
+                # Fetch fresh land data dynamically to get updated owner/chunks
+                fresh_land = await db.get_land_by_id(land_id)
+                land_name = fresh_land["name"] if fresh_land else entry["land_name"]
+                owner_id = fresh_land["owner_id"] if fresh_land else entry["owner_id"]
                 officer_ids = await db.get_officers(land_id)
-                chunks = entry["chunks"]
+                chunks = fresh_land["chunks"] if fresh_land else entry["chunks"]
                 price = models.block_price(chunks, full_block_cost)
                 tier_label = models.price_tier_label(chunks, full_block_cost)
+
+                # Set live allowed reactors for this guild
+                self._allowed_reactors[guild.id] = {owner_id, *officer_ids}
 
                 # Mention owner + any officers
                 pings = [f"<@{owner_id}>"] + [f"<@{uid}>" for uid in officer_ids]
@@ -180,11 +187,8 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 # Record the offer in the DB
                 offer_id = await db.create_rotation_offer(guild.id, land_id, msg.id)
 
-                # Allowed to respond: owner + officers
-                allowed_uids = {owner_id, *officer_ids}
-
-                # Wait for reaction or staff skip
-                result, reactor_id = await self._wait_for_reaction(msg, allowed_uids, timeout_minutes * 60, skip_event)
+                # Wait for reaction or staff skip (checks allowed reactors dynamically)
+                result, reactor_id = await self._wait_for_reaction(guild.id, msg, timeout_minutes * 60, skip_event)
 
                 if result == "accept":
                     # Process the purchase
@@ -248,14 +252,24 @@ class RotationCog(commands.GroupCog, name="rotation"):
             log.info(f"[{guild.name}] Rotation cascade cancelled.")
             raise
 
+    async def refresh_allowed_reactors(self, guild_id: int):
+        """Update allowed reactors dynamically if an offer is currently pending."""
+        pending = await db.get_pending_rotation_offer(guild_id)
+        if pending:
+            officer_ids = await db.get_officers(pending["land_id"])
+            fresh_land = await db.get_land_by_id(pending["land_id"])
+            owner_id = fresh_land["owner_id"] if fresh_land else pending["owner_id"]
+            self._allowed_reactors[guild_id] = {owner_id, *officer_ids}
+
     async def _wait_for_reaction(
-        self, message: discord.Message, allowed_uids: set[int], timeout_seconds: float, skip_event: asyncio.Event = None
+        self, guild_id: int, message: discord.Message, timeout_seconds: float, skip_event: asyncio.Event = None
     ) -> tuple[str, int | None]:
         """Wait for the owner or an officer to react, or staff to skip."""
         def check(payload: discord.RawReactionActionEvent):
+            allowed = self._allowed_reactors.get(guild_id, set())
             return (
                 payload.message_id == message.id
-                and payload.user_id in allowed_uids
+                and payload.user_id in allowed
                 and str(payload.emoji) in (ACCEPT_EMOJI, PASS_EMOJI)
             )
 
@@ -419,13 +433,8 @@ class RotationCog(commands.GroupCog, name="rotation"):
             ephemeral=True,
         )
 
-    @app_commands.command(name="cancel", description="[Staff] End and cancel the active rotation selection for today")
-    @app_commands.guild_only()
-    async def rotation_cancel(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        if not await _is_staff(interaction):
-            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
-
+    async def _do_cancel(self, interaction: discord.Interaction):
+        """Shared cancel/end logic — caller must defer first."""
         task = self._cascade_tasks.get(interaction.guild_id)
         has_task = task and not task.done()
         pending = await db.get_pending_rotation_offer(interaction.guild_id)
@@ -460,10 +469,21 @@ class RotationCog(commands.GroupCog, name="rotation"):
 
         await interaction.followup.send("🛑 Active rotation selection ended and cancelled.", ephemeral=True)
 
+    @app_commands.command(name="cancel", description="[Staff] End and cancel the active rotation selection for today")
+    @app_commands.guild_only()
+    async def rotation_cancel(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+        await self._do_cancel(interaction)
+
     @app_commands.command(name="end", description="[Staff] End and cancel the active rotation selection for today")
     @app_commands.guild_only()
     async def rotation_end(self, interaction: discord.Interaction):
-        await self.rotation_cancel.callback(self, interaction)
+        await interaction.response.defer(ephemeral=True)
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+        await self._do_cancel(interaction)
 
     @app_commands.command(name="pause", description="[Staff] Pause the daily rotation system and stop any active selection")
     @app_commands.guild_only()
@@ -534,21 +554,93 @@ class RotationCog(commands.GroupCog, name="rotation"):
         else:
             await interaction.followup.send("▶️ Daily rotation resumed. It will trigger at the next scheduled time.", ephemeral=True)
 
-    @app_commands.command(name="trigger", description="[Staff] Manually trigger today's rotation now")
+    async def _do_reping(self, interaction: discord.Interaction):
+        """Shared reping/resend logic — caller must defer first."""
+        pending = await db.get_pending_rotation_offer(interaction.guild_id)
+        if not pending:
+            return await interaction.followup.send("📭 No active rotation offer is currently waiting for a response.", ephemeral=True)
+
+        land_id = pending["land_id"]
+        land_name = pending["land_name"]
+
+        # Cancel current cascade task
+        task = self._cascade_tasks.get(interaction.guild_id)
+        if task and not task.done():
+            task.cancel()
+
+        # Mark old offer as replaced
+        await db.update_rotation_offer(pending["id"], "replaced")
+
+        # Clean up old message
+        channel = await _get_rotation_channel(interaction.guild)
+        if channel and pending.get("message_id"):
+            try:
+                old_msg = await channel.fetch_message(pending["message_id"])
+                await old_msg.clear_reactions()
+                old_embed = old_msg.embeds[0] if old_msg.embeds else None
+                if old_embed:
+                    old_embed.title = "🔄 Daily Rotation — (Re-sent Below)"
+                    old_embed.colour = discord.Colour.dark_grey()
+                    await old_msg.edit(content=None, embed=old_embed)
+            except Exception:
+                pass
+
+        # Find position of this land in rotation order
+        order = await db.get_rotation_order(interaction.guild_id)
+        start_idx = 0
+        for idx, entry in enumerate(order):
+            if entry["land_id"] == land_id:
+                start_idx = idx
+                break
+
+        # Restart rotation from this exact land
+        await self._start_rotation(interaction.guild, start_position=start_idx)
+
+        await interaction.followup.send(
+            f"🔄 Re-sent and re-pinged offer for **{land_name}** with updated leaders/officers!",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="reping", description="[Staff] Re-send and re-ping the current turn offer with updated leaders/officers")
     @app_commands.guild_only()
-    async def rotation_trigger(self, interaction: discord.Interaction):
+    async def rotation_reping(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+        await self._do_reping(interaction)
+
+    @app_commands.command(name="resend", description="[Staff] Re-send and re-ping the current turn offer with updated leaders/officers")
+    @app_commands.guild_only()
+    async def rotation_resend(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not await _is_staff(interaction):
+            return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
+        await self._do_reping(interaction)
+
+    @app_commands.command(name="trigger", description="[Staff] Manually trigger today's rotation now")
+    @app_commands.describe(force="Force start rotation even if an offer is already pending (default: False)")
+    @app_commands.guild_only()
+    async def rotation_trigger(self, interaction: discord.Interaction, force: bool = False):
         await interaction.response.defer(ephemeral=True)
         if not await _is_staff(interaction):
             return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
 
-        # Check if there's already a pending offer
         pending = await db.get_pending_rotation_offer(interaction.guild_id)
-        if pending:
+        if pending and not force:
             return await interaction.followup.send(
-                f"⚠️ There's already a pending offer to **{pending['land_name']}**. "
-                f"Use `/rotation skip` first if you want to restart.",
+                f"⚠️ There's already a pending offer to **{pending['land_name']}**.\n"
+                f"• To re-ping this offer with updated officers, use `/rotation reping`.\n"
+                f"• To skip to the next settlement, use `/rotation skip`.\n"
+                f"• To cancel it completely, use `/rotation cancel`.\n"
+                f"• Or re-run with `/rotation trigger force:True`.",
                 ephemeral=True,
             )
+
+        if pending and force:
+            task = self._cascade_tasks.get(interaction.guild_id)
+            if task and not task.done():
+                task.cancel()
+            await db.update_rotation_offer(pending["id"], "cancelled")
 
         await interaction.followup.send("🔄 Starting rotation...", ephemeral=True)
         await self._start_rotation(interaction.guild)
