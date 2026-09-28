@@ -214,6 +214,17 @@ async def init_db():
                     user_id  BIGINT  NOT NULL,
                     UNIQUE(land_id, user_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS block_ledger (
+                    id          SERIAL PRIMARY KEY,
+                    land_id     INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    guild_id    BIGINT  NOT NULL,
+                    type        TEXT    NOT NULL,
+                    blocks      INTEGER NOT NULL DEFAULT 1,
+                    note        TEXT,
+                    recorded_by BIGINT,
+                    created_at  TEXT    NOT NULL
+                );
                 """
             )
 
@@ -325,6 +336,17 @@ async def init_db():
                     land_id  INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
                     user_id  INTEGER NOT NULL,
                     UNIQUE(land_id, user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS block_ledger (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    land_id     INTEGER NOT NULL REFERENCES lands(id) ON DELETE CASCADE,
+                    guild_id    INTEGER NOT NULL,
+                    type        TEXT    NOT NULL,
+                    blocks      INTEGER NOT NULL DEFAULT 1,
+                    note        TEXT,
+                    recorded_by INTEGER,
+                    created_at  TEXT    NOT NULL
                 );
                 """
             )
@@ -953,3 +975,78 @@ async def get_rotation_offers_today(guild_id: int, date_str: str) -> list[dict]:
             (guild_id, date_str + "%"),
         )
 
+
+# ── Block Ledger helpers ───────────────────────────────────────────────
+
+async def add_ledger_owed(land_id: int, guild_id: int, blocks: int, note: str = None, recorded_by: int = None):
+    """Record that a land is owed N blocks (e.g. rotation accepted)."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with DBConnection() as conn:
+        await conn.execute(
+            "INSERT INTO block_ledger (land_id, guild_id, type, blocks, note, recorded_by, created_at) "
+            "VALUES (?, ?, 'owed', ?, ?, ?, ?)",
+            (land_id, guild_id, blocks, note, recorded_by, now),
+        )
+
+
+async def add_ledger_delivered(land_id: int, guild_id: int, blocks: int, note: str = None, recorded_by: int = None):
+    """Record that N blocks were delivered to a land."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with DBConnection() as conn:
+        await conn.execute(
+            "INSERT INTO block_ledger (land_id, guild_id, type, blocks, note, recorded_by, created_at) "
+            "VALUES (?, ?, 'delivered', ?, ?, ?, ?)",
+            (land_id, guild_id, blocks, note, recorded_by, now),
+        )
+
+
+async def get_ledger_balance(land_id: int) -> dict:
+    """Return total owed, total delivered, and outstanding for a land."""
+    async with DBConnection() as conn:
+        owed_row = await conn.fetchone(
+            "SELECT COALESCE(SUM(blocks), 0) as total FROM block_ledger WHERE land_id = ? AND type = 'owed'",
+            (land_id,),
+        )
+        delivered_row = await conn.fetchone(
+            "SELECT COALESCE(SUM(blocks), 0) as total FROM block_ledger WHERE land_id = ? AND type = 'delivered'",
+            (land_id,),
+        )
+        total_owed = owed_row["total"] if owed_row else 0
+        total_delivered = delivered_row["total"] if delivered_row else 0
+        return {
+            "owed": total_owed,
+            "delivered": total_delivered,
+            "outstanding": total_owed - total_delivered,
+        }
+
+
+async def get_ledger_history(land_id: int, limit: int = 10) -> list[dict]:
+    """Return the last N ledger entries for a land, newest first."""
+    async with DBConnection() as conn:
+        return await conn.fetchall(
+            "SELECT * FROM block_ledger WHERE land_id = ? ORDER BY id DESC LIMIT ?",
+            (land_id, limit),
+        )
+
+
+async def get_all_ledger_status(guild_id: int) -> list[dict]:
+    """Return balance summary for every land in this guild that has any ledger entries."""
+    async with DBConnection() as conn:
+        rows = await conn.fetchall(
+            "SELECT l.id as land_id, l.name as land_name, l.owner_id, "
+            "COALESCE(SUM(CASE WHEN b.type = 'owed' THEN b.blocks ELSE 0 END), 0) as total_owed, "
+            "COALESCE(SUM(CASE WHEN b.type = 'delivered' THEN b.blocks ELSE 0 END), 0) as total_delivered "
+            "FROM lands l "
+            "LEFT JOIN block_ledger b ON l.id = b.land_id "
+            "WHERE l.guild_id = ? "
+            "GROUP BY l.id, l.name, l.owner_id "
+            "ORDER BY (COALESCE(SUM(CASE WHEN b.type = 'owed' THEN b.blocks ELSE 0 END), 0) "
+            "         - COALESCE(SUM(CASE WHEN b.type = 'delivered' THEN b.blocks ELSE 0 END), 0)) DESC, l.name ASC",
+            (guild_id,),
+        )
+        # Attach outstanding calculation
+        result = []
+        for r in rows:
+            outstanding = r["total_owed"] - r["total_delivered"]
+            result.append({**r, "outstanding": outstanding})
+        return result

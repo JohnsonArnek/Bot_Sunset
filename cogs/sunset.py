@@ -108,6 +108,19 @@ class SunsetCog(commands.GroupCog, name="sunset"):
         )
 
         embed.add_field(
+            name="📦 Block Delivery Ledger",
+            value=(
+                "Tracks which lands are owed blocks by the nation leader:\n"
+                "• `/ledger status` — 🔒 Overview of all lands and their owed blocks.\n"
+                "• `/ledger balance [land]` — Your land's owed/delivered balance.\n"
+                "• `/ledger deliver <land> [blocks] [note]` — Mark blocks as delivered.\n"
+                "• `/ledger owe <land> [blocks] [note]` — 🔒 Manually add an owed entry.\n"
+                "• `/ledger history [land] [limit]` — Full chronological log."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
             name="ℹ️ Info",
             value=(
                 "• `/reserve view` — View Leftover Pool & Reserve status.\n"

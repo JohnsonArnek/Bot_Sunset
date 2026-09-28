@@ -200,6 +200,15 @@ class RotationCog(commands.GroupCog, name="rotation"):
                     await db.update_rotation_offer(offer_id, "accepted")
                     await db.move_to_bottom(guild.id, land_id)
 
+                    # Record in delivery ledger — leader now owes this land N blocks
+                    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    await db.add_ledger_owed(
+                        land_id, guild.id,
+                        blocks=daily_blocks,
+                        note=f"Rotation {today_str}",
+                        recorded_by=self.bot.user.id if self.bot.user else None,
+                    )
+
                     reactor_str = f" (via <@{reactor_id}>)" if reactor_id else ""
                     confirm_embed = discord.Embed(
                         title="✅ Block Claimed!",

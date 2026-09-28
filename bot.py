@@ -69,6 +69,7 @@ EXTENSIONS = [
     "cogs.distribution",
     "cogs.auction",
     "cogs.rotation",
+    "cogs.ledger",
 ]
 
 
