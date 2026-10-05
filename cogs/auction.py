@@ -122,6 +122,12 @@ class AuctionCog(commands.GroupCog, name="auction"):
             await db.update_land_chunks(land_id, old_chunks + 1)
             await db.add_reserve_blocks(guild_id, -1)
             await db.record_purchase(land_id, "auction", amount)
+            await db.add_ledger_owed(
+                land_id, guild_id,
+                blocks=1,
+                note=f"Auction win (bid {amount} ems)",
+                recorded_by=self.bot.user.id if self.bot.user else None,
+            )
 
             winners_info.append(f"🏰 **{land_name}** (<@{owner_id}>) — **{amount} ems** (+1 chunk)")
 

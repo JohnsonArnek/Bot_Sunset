@@ -166,6 +166,12 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         await db.update_land_chunks(land["id"], new_chunks)
         await db.record_purchase(land["id"], "normal", price)
         await db.update_request_status(approved["id"], "purchased")
+        await db.add_ledger_owed(
+            land["id"], interaction.guild_id,
+            blocks=approved["chunks_requested"],
+            note=f"Weekly purchase ({approved['chunks_requested']} block(s) @ {price} ems)",
+            recorded_by=interaction.user.id,
+        )
 
         embed = discord.Embed(
             title="✅ Claim Block Purchased",
@@ -216,6 +222,12 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         await db.update_land_chunks(land["id"], new_chunks)
         await db.update_reserve_blocks(interaction.guild_id, reserve["total_blocks"] - 1)
         await db.record_purchase(land["id"], "reserve", price)
+        await db.add_ledger_owed(
+            land["id"], interaction.guild_id,
+            blocks=1,
+            note=f"Reserve purchase (1.5× @ {price} ems)",
+            recorded_by=interaction.user.id,
+        )
 
         embed = discord.Embed(
             title="🔒 Reserve Block Purchased",
@@ -267,6 +279,12 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         await db.update_land_chunks(land["id"], new_chunks)
         await db.add_leftover_blocks(interaction.guild_id, -1)
         await db.record_purchase(land["id"], "leftover", price)
+        await db.add_ledger_owed(
+            land["id"], interaction.guild_id,
+            blocks=1,
+            note=f"Leftover pool purchase (@ {price} ems)",
+            recorded_by=interaction.user.id,
+        )
 
         embed = discord.Embed(
             title="🛒 Leftover Block Purchased",
