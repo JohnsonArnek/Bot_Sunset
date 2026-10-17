@@ -57,23 +57,31 @@ def _format_query(query: str) -> str:
 
 # ── Connection Pool ───────────────────────────────────────────────────
 _pool = None
+_pool_lock = None  # Initialised lazily inside async context
 
 
 async def _get_pool():
-    global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    global _pool, _pool_lock
+    # Initialise the lock lazily (needs a running event loop)
+    if _pool_lock is None:
+        import asyncio
+        _pool_lock = asyncio.Lock()
+    async with _pool_lock:
+        if _pool is None:
+            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     return _pool
+
 
 class DBConnection:
     def __init__(self):
         self.sqlite_conn = None
         self.pg_conn = None
+        self._pg_pool = None  # Remember which pool we acquired from
 
     async def __aenter__(self):
         if IS_POSTGRES:
-            pool = await _get_pool()
-            self.pg_conn = await pool.acquire()
+            self._pg_pool = await _get_pool()
+            self.pg_conn = await self._pg_pool.acquire()
             return self
         else:
             self.sqlite_conn = await aiosqlite.connect(DB_PATH)
@@ -81,9 +89,8 @@ class DBConnection:
             return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.pg_conn:
-            pool = await _get_pool()
-            await pool.release(self.pg_conn)
+        if self.pg_conn and self._pg_pool:
+            await self._pg_pool.release(self.pg_conn)
         if self.sqlite_conn:
             await self.sqlite_conn.close()
 
@@ -243,6 +250,7 @@ async def init_db():
                     log.warning(f"Migration skipped: {e}")
         finally:
             await conn.close()
+        await _get_pool()
     else:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.executescript(
