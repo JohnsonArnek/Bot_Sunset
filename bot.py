@@ -92,16 +92,28 @@ async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
     if not _synced:
-        # Sync commands PER-GUILD (instant) — only on first connect, not reconnects
+        # Sync commands PER-GUILD (instant) — only on first connect, not reconnects.
+        # Use a longer delay and retry on 429 to avoid Discord global rate limits.
         for guild in bot.guilds:
-            try:
-                bot.tree.clear_commands(guild=guild)
-                bot.tree.copy_global_to(guild=guild)
-                await bot.tree.sync(guild=guild)
-                log.info(f"Synced commands to {guild.name} ({guild.id})")
-                await asyncio.sleep(2)  # Small delay to avoid rate limits
-            except Exception as e:
-                log.warning(f"Could not sync commands for {guild.name}: {e}")
+            for attempt in range(3):
+                try:
+                    bot.tree.clear_commands(guild=guild)
+                    bot.tree.copy_global_to(guild=guild)
+                    await bot.tree.sync(guild=guild)
+                    log.info(f"Synced commands to {guild.name} ({guild.id})")
+                    await asyncio.sleep(5)  # 5s between guilds to stay well under rate limits
+                    break  # Success — move to next guild
+                except discord.HTTPException as e:
+                    if e.status == 429:
+                        retry_after = float(getattr(e, 'retry_after', 10) or 10)
+                        log.warning(f"Rate limited syncing {guild.name}, waiting {retry_after:.1f}s (attempt {attempt+1}/3)")
+                        await asyncio.sleep(retry_after + 2)
+                    else:
+                        log.warning(f"Could not sync commands for {guild.name}: {e}")
+                        break
+                except Exception as e:
+                    log.warning(f"Could not sync commands for {guild.name}: {e}")
+                    break
         _synced = True
     else:
         log.info("Reconnected — skipping command sync (already synced this session).")
