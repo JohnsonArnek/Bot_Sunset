@@ -162,11 +162,32 @@ def run_health_server():
 async def main():
     # Start health check server for hosting platforms in the background
     threading.Thread(target=run_health_server, daemon=True).start()
-    
+
     await database.init_db()
     log.info("Database initialised.")
     await load_extensions()
-    await bot.start(TOKEN)
+
+    # Retry login with exponential backoff if Discord rate-limits us.
+    # This prevents the Render restart-loop death spiral on 429s.
+    backoff = 10  # seconds
+    for attempt in range(10):
+        try:
+            await bot.start(TOKEN)
+            break  # Clean exit — no retry needed
+        except discord.HTTPException as e:
+            if e.status == 429:
+                retry_after = float(getattr(e, 'retry_after', backoff) or backoff)
+                wait = max(retry_after, backoff)
+                log.warning(
+                    f"Discord login rate-limited (attempt {attempt + 1}/10). "
+                    f"Waiting {wait:.0f}s before retrying..."
+                )
+                await asyncio.sleep(wait)
+                backoff = min(backoff * 2, 300)  # Exponential backoff, cap at 5 min
+            else:
+                raise
+        except KeyboardInterrupt:
+            break
 
 
 if __name__ == "__main__":
