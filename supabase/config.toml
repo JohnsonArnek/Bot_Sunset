@@ -1,0 +1,4 @@
+[functions.bot-health]
+# Public, read-only status: returns only {"healthy": true/false}.
+# There are no wake-up or configuration actions on this endpoint.
+verify_jwt = false
