@@ -6,3 +6,4 @@ __pycache__/
 .env.*
 !.env.example
 .pytest_cache/
+supabase/.temp/

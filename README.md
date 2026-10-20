@@ -35,14 +35,26 @@ The server DB user must own/create the control tables and bypass their RLS
 public policies on them. Never put the DB password or bot token in the repository.
 The environment template is [`.env.example`](.env.example); it is not auto-loaded.
 
-## Choose warm or cold standby
+## Cold standby with UptimeBot or another hosted monitor
+
+Use the [Supabase cold-standby setup](supabase/COLD_STANDBY.md) to avoid keeping
+the backup awake. Supabase Cron pings only the leader and wakes a candidate
+when needed. Point the uptime monitor at the included read-only Supabase health
+endpoint; monitoring it never wakes either Render bot. No third always-on
+service or Render API key is required.
+
+The scheduler/health endpoint must be installed separately using that guide.
+They are not activated by deploying the Python bot. Do not also run the Python
+watchdog below or retain direct uptime monitors on either Render service.
+
+## Other hosting options
 
 **Warm:** keep pinging `/health` on both services from your existing pinger.
 The backup stays awake but disconnected from Discord. After a crash it can
 acquire the lease within about 90–100 seconds. Detected failures can release
 sooner, after shutdown. Both services consume running hours.
 
-**Cold:** run `python watchdog.py` on your existing, independent pinger host
+**Cold with a Python host:** run `python watchdog.py` on an independent machine
 with the same dependencies, `BOT_GROUP`, database access and this mapping:
 
 ```text
@@ -131,11 +143,16 @@ Use simulated responses in automated tests; do not deliberately provoke an IP ba
 
 ```text
 python -m unittest discover -s tests -v
+node --test tests/test_health_endpoint.mjs
 ```
 
 Postgres integration tests require `TEST_DATABASE_URL` pointing to a **disposable
 test database**, not Supabase production. They exercise concurrent election,
 expiry, cooldown, stale-owner fencing and lock ordering. Without that variable,
 those tests are explicitly skipped.
+The Supabase scheduler SQL tests use real Postgres with a stubbed `pg_net`
+queue/response adapter; they do not make external requests. The Edge handler is
+tested locally with mocked Supabase responses. Hosted scheduling, deployment
+and Render sleep/wake behavior still require the deployment smoke test.
 Single-instance development still works with `FAILOVER_ENABLED=false` (default)
 and SQLite.
