@@ -7,6 +7,7 @@ All data is partitioned by Discord guild_id (per-server isolation).
 import os
 import re
 import logging
+from contextlib import asynccontextmanager
 import aiosqlite
 import asyncpg
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ def _format_query(query: str) -> str:
 # ── Connection Pool ───────────────────────────────────────────────────
 _pool = None
 _pool_lock = None  # Initialised lazily inside async context
+leader_lease = None  # Set only by the failover supervisor, before loading cogs.
 
 
 async def _get_pool():
@@ -68,7 +70,10 @@ async def _get_pool():
         _pool_lock = asyncio.Lock()
     async with _pool_lock:
         if _pool is None:
-            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+            _pool = await asyncpg.create_pool(
+                DATABASE_URL, min_size=1, max_size=5, timeout=10,
+                command_timeout=10, statement_cache_size=0,
+            )
     return _pool
 
 
@@ -81,7 +86,7 @@ class DBConnection:
     async def __aenter__(self):
         if IS_POSTGRES:
             self._pg_pool = await _get_pool()
-            self.pg_conn = await self._pg_pool.acquire()
+            self.pg_conn = await self._pg_pool.acquire(timeout=10)
             return self
         else:
             self.sqlite_conn = await aiosqlite.connect(DB_PATH)
@@ -97,7 +102,8 @@ class DBConnection:
     async def execute(self, query: str, params: tuple = ()):
         q = _format_query(query)
         if IS_POSTGRES:
-            await self.pg_conn.execute(q, *params)
+            async with self._fenced():
+                await self.pg_conn.execute(q, *params)
         else:
             await self.sqlite_conn.execute(q, params)
             await self.sqlite_conn.commit()
@@ -105,7 +111,8 @@ class DBConnection:
     async def fetchone(self, query: str, params: tuple = ()) -> dict | None:
         q = _format_query(query)
         if IS_POSTGRES:
-            row = await self.pg_conn.fetchrow(q, *params)
+            async with self._fenced():
+                row = await self.pg_conn.fetchrow(q, *params)
             return dict(row) if row else None
         else:
             async with self.sqlite_conn.execute(q, params) as cur:
@@ -115,18 +122,29 @@ class DBConnection:
     async def fetchall(self, query: str, params: tuple = ()) -> list[dict]:
         q = _format_query(query)
         if IS_POSTGRES:
-            rows = await self.pg_conn.fetch(q, *params)
+            async with self._fenced():
+                rows = await self.pg_conn.fetch(q, *params)
             return [dict(r) for r in rows]
         else:
             async with self.sqlite_conn.execute(q, params) as cur:
                 rows = await cur.fetchall()
                 return [dict(r) for r in rows]
 
+    @asynccontextmanager
+    async def _fenced(self):
+        if leader_lease is None:
+            yield
+        else:
+            async with leader_lease.fence(self.pg_conn):
+                yield
+
 
 async def init_db():
     """Create all tables if they don't exist and run schema migrations. Called on startup."""
     if IS_POSTGRES:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await asyncpg.connect(
+            DATABASE_URL, timeout=10, command_timeout=10, statement_cache_size=0,
+        )
         try:
             # ── Create tables (only runs if they don't exist yet) ──
             await conn.execute(

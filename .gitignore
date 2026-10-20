@@ -2,3 +2,7 @@ config.json
 *.db
 __pycache__/
 .venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/

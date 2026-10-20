@@ -10,15 +10,15 @@ import json
 import asyncio
 import hashlib
 import logging
-import threading
+import signal
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 import database
+from failover import Runtime, is_cloudflare_ban, retry_after_seconds
 
 # ── Logging ───────────────────────────────────────────────────────────
 
@@ -42,11 +42,6 @@ if not TOKEN:
         except Exception as e:
             log.warning(f"Failed to read config.json: {e}")
 
-if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
-    raise SystemExit(
-        "⚠️  Please set the DISCORD_TOKEN environment variable or fill in config.json before running."
-    )
-
 # ── Bot setup ─────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
@@ -57,6 +52,7 @@ bot = commands.Bot(
     intents=intents,
     help_command=None,
 )
+runtime = Runtime(bot)
 
 # ── Cog loading ───────────────────────────────────────────────────────
 
@@ -81,33 +77,11 @@ async def load_extensions():
             log.info(f"Loaded extension: {ext}")
         except Exception as e:
             log.error(f"Failed to load extension {ext}: {e}")
+            if runtime.enabled:
+                raise  # A partially loaded leader must not report healthy.
 
 
 # ── Discord API helpers ───────────────────────────────────────────────
-
-def is_cloudflare_ban(error: discord.HTTPException) -> bool:
-    """Return True when Discord's edge has temporarily banned this IP (error 1015).
-
-    A normal Discord 429 has a JSON body with ``retry_after``. A Cloudflare ban
-    returns an HTML page instead and retrying immediately only extends the ban.
-    """
-    body = (getattr(error, "text", "") or "").lower()
-    return error.status == 429 and ("cloudflare" in body or "<html" in body)
-
-
-def retry_after_seconds(error: discord.HTTPException, default: float) -> float:
-    """Read ``retry_after`` from the JSON body or the Retry-After header."""
-    value = getattr(error, "retry_after", None)
-    if not value:
-        try:
-            value = error.response.headers.get("Retry-After")
-        except (AttributeError, TypeError):
-            value = None
-    try:
-        return max(float(value), 1.0) if value else default
-    except (TypeError, ValueError):
-        return default
-
 
 def _command_fingerprint() -> str:
     """Build a stable hash of the registered slash-command tree."""
@@ -160,9 +134,11 @@ async def sync_commands():
     """
     fingerprint = _command_fingerprint()
 
-    raw_state = await db.get_config(0, "command_sync_state")
+    raw_state = await database.get_config(0, "command_sync_state")
     try:
         state = json.loads(raw_state) if raw_state else {}
+        if not isinstance(state, dict):
+            state = {}
     except (TypeError, ValueError):
         state = {}
 
@@ -172,13 +148,17 @@ async def sync_commands():
         return
 
     for index, guild in enumerate(stale):
+        if runtime.enabled and (runtime.failure.is_set() or not runtime.lease.valid()):
+            return
         try:
             bot.tree.clear_commands(guild=guild)
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
+            runtime.rest_succeeded()
             log.info(f"Synced {len(synced)} commands to {guild.name} ({guild.id})")
         except discord.HTTPException as e:
             if is_cloudflare_ban(e):
+                runtime.discord_error(e)
                 log.error(
                     "Cannot sync commands: this server's outbound IP is temporarily "
                     "banned by Discord/Cloudflare (error 1015). Stopping sync; it "
@@ -197,7 +177,7 @@ async def sync_commands():
             continue
 
         state[str(guild.id)] = fingerprint
-        await db.set_config(0, "command_sync_state", json.dumps(state))
+        await database.set_config(0, "command_sync_state", json.dumps(state))
 
         if index < len(stale) - 1:
             await asyncio.sleep(5)  # 5s between guilds to stay well under rate limits
@@ -239,6 +219,10 @@ async def on_guild_join(guild: discord.Guild):
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     command_name = interaction.command.name if interaction.command else "unknown"
     original = getattr(error, "original", error)
+    runtime.discord_error(original)
+
+    if runtime.enabled and (runtime.failure.is_set() or not runtime.lease.valid()):
+        return
 
     if isinstance(original, discord.HTTPException) and original.status == 429:
         # Trying to send a reply here would just generate another rate-limited
@@ -256,37 +240,55 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         pass
 
 
-# ── Web Server for Health Checks ──────────────────────────────────────
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-        
-    def log_message(self, format, *args):
-        # Silence HTTP request logs to keep terminal output clean
-        return
-
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    log.info(f"Starting health check web server on port {port}...")
-    try:
-        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-        server.serve_forever()
-    except Exception as e:
-        log.error(f"Health server failed to start: {e}")
-
-
 # ── Main ──────────────────────────────────────────────────────────────
 
 async def main():
-    # Start health check server for hosting platforms in the background
-    threading.Thread(target=run_health_server, daemon=True).start()
+    global runtime
+    if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
+        raise SystemExit("Set DISCORD_TOKEN or the token in config.json before running.")
+    enabled_value = os.environ.get("FAILOVER_ENABLED", "false").lower()
+    if enabled_value not in ("true", "false"):
+        raise SystemExit("FAILOVER_ENABLED must be true or false.")
+    enabled = enabled_value == "true"
+    instance = os.environ.get("BOT_INSTANCE_ID", "").strip()
+    group = os.environ.get("BOT_GROUP", "sunset").strip()
+    if enabled and (not database.IS_POSTGRES or not instance or not group):
+        raise SystemExit(
+            "Failover requires a PostgreSQL DATABASE_URL, BOT_INSTANCE_ID and BOT_GROUP."
+        )
+    runtime = Runtime(bot, enabled, instance, group)
+    runtime.start_http(int(os.environ.get("PORT", 8080)))
 
+    # Render sends SIGTERM before stopping a deployment.
+    task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    except NotImplementedError:  # Windows
+        pass
+
+    if enabled:
+        async def start_leader():
+            # Initialise Discord's asyncio state before cog_load starts loops.
+            async with bot:
+                await database.init_db()
+                await load_extensions()
+                await bot.start(TOKEN)
+        return await runtime.run(TOKEN, start_leader)
+
+    async with bot:
+        monitor = asyncio.create_task(runtime._monitor_discord(TOKEN))
+        try:
+            return await run_standalone()
+        finally:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+
+
+async def run_standalone():
     await database.init_db()
+    runtime.database_ok = True
+    runtime.role = "leader"
     log.info("Database initialised.")
     await load_extensions()
 
@@ -297,7 +299,7 @@ async def main():
     while True:
         try:
             await bot.start(TOKEN)
-            return  # Clean shutdown
+            return 0  # Clean shutdown
         except discord.LoginFailure:
             log.error("Discord rejected the bot token. Check the DISCORD_TOKEN variable.")
             raise
@@ -324,8 +326,11 @@ async def main():
                 )
             await asyncio.sleep(wait)
         except KeyboardInterrupt:
-            return
+            return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        raise SystemExit(asyncio.run(main()))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
