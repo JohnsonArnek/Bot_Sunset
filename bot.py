@@ -8,6 +8,7 @@ and syncs slash commands automatically to all guilds the bot is in.
 import os
 import json
 import asyncio
+import hashlib
 import logging
 import threading
 from pathlib import Path
@@ -82,6 +83,126 @@ async def load_extensions():
             log.error(f"Failed to load extension {ext}: {e}")
 
 
+# ── Discord API helpers ───────────────────────────────────────────────
+
+def is_cloudflare_ban(error: discord.HTTPException) -> bool:
+    """Return True when Discord's edge has temporarily banned this IP (error 1015).
+
+    A normal Discord 429 has a JSON body with ``retry_after``. A Cloudflare ban
+    returns an HTML page instead and retrying immediately only extends the ban.
+    """
+    body = (getattr(error, "text", "") or "").lower()
+    return error.status == 429 and ("cloudflare" in body or "<html" in body)
+
+
+def retry_after_seconds(error: discord.HTTPException, default: float) -> float:
+    """Read ``retry_after`` from the JSON body or the Retry-After header."""
+    value = getattr(error, "retry_after", None)
+    if not value:
+        try:
+            value = error.response.headers.get("Retry-After")
+        except (AttributeError, TypeError):
+            value = None
+    try:
+        return max(float(value), 1.0) if value else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _command_fingerprint() -> str:
+    """Build a stable hash of the registered slash-command tree."""
+
+    def serialize(command):
+        data = {
+            "name": command.name,
+            "description": getattr(command, "description", "") or "",
+            "nsfw": getattr(command, "nsfw", None),
+            "guild_only": getattr(command, "guild_only", None),
+            "default_permissions": str(getattr(command, "default_permissions", None)),
+            "params": [
+                {
+                    "name": param.name,
+                    "description": getattr(param, "description", "") or "",
+                    "type": str(param.type),
+                    "required": param.required,
+                    "choices": sorted(
+                        (str(choice.name), str(choice.value))
+                        for choice in getattr(param, "choices", [])
+                    ),
+                }
+                for param in getattr(command, "parameters", [])
+            ],
+        }
+        children = getattr(command, "commands", None)
+        if children:
+            data["children"] = sorted(
+                (serialize(child) for child in children),
+                key=lambda item: item["name"],
+            )
+        return data
+
+    payload = sorted(
+        (serialize(command) for command in bot.tree.get_commands()),
+        key=lambda item: item["name"],
+    )
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+async def sync_commands():
+    """Sync commands only when the tree changed, and only for guilds that are stale.
+
+    The bot used to re-sync every guild on every process start. Render restarts
+    and wakes the service often, so that created unnecessary API calls — exactly
+    the kind of traffic that contributes to Discord's IP-level rate limits.
+    Sync state is stored in the database under guild_id 0.
+    """
+    fingerprint = _command_fingerprint()
+
+    raw_state = await db.get_config(0, "command_sync_state")
+    try:
+        state = json.loads(raw_state) if raw_state else {}
+    except (TypeError, ValueError):
+        state = {}
+
+    stale = [guild for guild in bot.guilds if state.get(str(guild.id)) != fingerprint]
+    if not stale:
+        log.info("Slash commands already up to date — skipping sync.")
+        return
+
+    for index, guild in enumerate(stale):
+        try:
+            bot.tree.clear_commands(guild=guild)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            log.info(f"Synced {len(synced)} commands to {guild.name} ({guild.id})")
+        except discord.HTTPException as e:
+            if is_cloudflare_ban(e):
+                log.error(
+                    "Cannot sync commands: this server's outbound IP is temporarily "
+                    "banned by Discord/Cloudflare (error 1015). Stopping sync; it "
+                    "will retry on the next start."
+                )
+                return
+            if e.status == 429:
+                wait = retry_after_seconds(e, 30)
+                log.warning(f"Rate limited syncing {guild.name}; waiting {wait:.0f}s")
+                await asyncio.sleep(wait + 2)
+                continue
+            log.warning(f"Could not sync commands for {guild.name}: {e}")
+            continue
+        except Exception as e:
+            log.warning(f"Could not sync commands for {guild.name}: {e}")
+            continue
+
+        state[str(guild.id)] = fingerprint
+        await db.set_config(0, "command_sync_state", json.dumps(state))
+
+        if index < len(stale) - 1:
+            await asyncio.sleep(5)  # 5s between guilds to stay well under rate limits
+
+
 # ── Events & Error Handling ───────────────────────────────────────────
 
 _synced = False
@@ -92,38 +213,40 @@ async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
     if not _synced:
-        # Sync commands PER-GUILD (instant) — only on first connect, not reconnects.
-        # Use a longer delay and retry on 429 to avoid Discord global rate limits.
-        for guild in bot.guilds:
-            for attempt in range(3):
-                try:
-                    bot.tree.clear_commands(guild=guild)
-                    bot.tree.copy_global_to(guild=guild)
-                    await bot.tree.sync(guild=guild)
-                    log.info(f"Synced commands to {guild.name} ({guild.id})")
-                    await asyncio.sleep(5)  # 5s between guilds to stay well under rate limits
-                    break  # Success — move to next guild
-                except discord.HTTPException as e:
-                    if e.status == 429:
-                        retry_after = float(getattr(e, 'retry_after', 10) or 10)
-                        log.warning(f"Rate limited syncing {guild.name}, waiting {retry_after:.1f}s (attempt {attempt+1}/3)")
-                        await asyncio.sleep(retry_after + 2)
-                    else:
-                        log.warning(f"Could not sync commands for {guild.name}: {e}")
-                        break
-                except Exception as e:
-                    log.warning(f"Could not sync commands for {guild.name}: {e}")
-                    break
+        # Mark before syncing so a reconnect during a long sync can't start a second one.
         _synced = True
+        try:
+            await sync_commands()
+        except Exception:
+            log.exception("Command sync failed")
     else:
-        log.info("Reconnected — skipping command sync (already synced this session).")
+        log.info("Reconnected — skipping command sync (already handled this session).")
 
     log.info(f"Ready! Serving {len(bot.guilds)} guild(s).")
 
 
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Give a newly joined guild its commands without re-syncing every other guild."""
+    log.info(f"Joined guild {guild.name} ({guild.id}) — syncing commands.")
+    try:
+        await sync_commands()
+    except Exception:
+        log.exception(f"Command sync failed for new guild {guild.id}")
+
+
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    log.error(f"App command error in /{interaction.command.name if interaction.command else 'unknown'}: {error}", exc_info=error)
+    command_name = interaction.command.name if interaction.command else "unknown"
+    original = getattr(error, "original", error)
+
+    if isinstance(original, discord.HTTPException) and original.status == 429:
+        # Trying to send a reply here would just generate another rate-limited
+        # request. Log it and let the interaction expire instead.
+        log.warning(f"/{command_name} was rate limited (429); skipping error reply.")
+        return
+
+    log.error(f"App command error in /{command_name}: {error}", exc_info=error)
     try:
         if interaction.response.is_done():
             await interaction.followup.send(f"❌ An error occurred: `{error}`", ephemeral=True)
@@ -167,27 +290,41 @@ async def main():
     log.info("Database initialised.")
     await load_extensions()
 
-    # Retry login with exponential backoff if Discord rate-limits us.
-    # This prevents the Render restart-loop death spiral on 429s.
-    backoff = 10  # seconds
-    for attempt in range(10):
+    # Retry login if Discord rate-limits us.
+    # A Cloudflare 1015 response is an IP-level ban, not a normal bot rate limit:
+    # retrying quickly only extends it, so wait at least 30 minutes in that case.
+    attempt = 0
+    while True:
         try:
             await bot.start(TOKEN)
-            break  # Clean exit — no retry needed
+            return  # Clean shutdown
+        except discord.LoginFailure:
+            log.error("Discord rejected the bot token. Check the DISCORD_TOKEN variable.")
+            raise
         except discord.HTTPException as e:
-            if e.status == 429:
-                retry_after = float(getattr(e, 'retry_after', backoff) or backoff)
-                wait = max(retry_after, backoff)
+            if e.status != 429:
+                raise
+
+            attempt += 1
+            if is_cloudflare_ban(e):
+                wait = retry_after_seconds(e, 30 * 60)
+                log.error(
+                    "Discord/Cloudflare is blocking this server's outbound IP "
+                    f"(429, error 1015). This is an IP-level ban, usually caused by "
+                    "other services sharing the same hosting egress IP. Waiting "
+                    f"{wait / 60:.0f} min before retrying (attempt {attempt}). "
+                    "If this keeps happening, move the Render service to another "
+                    "region or use a dedicated/proxied outbound IP."
+                )
+            else:
+                wait = retry_after_seconds(e, 30)
                 log.warning(
-                    f"Discord login rate-limited (attempt {attempt + 1}/10). "
+                    f"Discord login rate-limited (attempt {attempt}). "
                     f"Waiting {wait:.0f}s before retrying..."
                 )
-                await asyncio.sleep(wait)
-                backoff = min(backoff * 2, 300)  # Exponential backoff, cap at 5 min
-            else:
-                raise
+            await asyncio.sleep(wait)
         except KeyboardInterrupt:
-            break
+            return
 
 
 if __name__ == "__main__":
