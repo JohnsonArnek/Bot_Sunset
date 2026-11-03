@@ -130,6 +130,13 @@ class DBConnection:
                 rows = await cur.fetchall()
                 return [dict(r) for r in rows]
 
+    async def execute_returning_one(self, query: str, params: tuple = ()) -> dict | None:
+        """Run a single-row mutation with RETURNING and commit it on both backends."""
+        row = await self.fetchone(query, params)
+        if not IS_POSTGRES:
+            await self.sqlite_conn.commit()
+        return row
+
     @asynccontextmanager
     async def _fenced(self):
         if leader_lease is None:
@@ -137,6 +144,38 @@ class DBConnection:
         else:
             async with leader_lease.fence(self.pg_conn):
                 yield
+
+
+def war_schema(postgres: bool) -> str:
+    prefix = "sunset_war." if postgres else ""
+    tables = f"""
+        CREATE TABLE IF NOT EXISTS {prefix}war_stock (
+            guild_id BIGINT NOT NULL,
+            location_key TEXT NOT NULL,
+            location TEXT NOT NULL,
+            hay INTEGER NOT NULL CHECK (hay >= 0),
+            diamonds INTEGER NOT NULL CHECK (diamonds >= 0),
+            iron INTEGER NOT NULL DEFAULT 0 CHECK (iron >= 0),
+            arrows INTEGER NOT NULL DEFAULT 0 CHECK (arrows >= 0),
+            PRIMARY KEY (guild_id, location_key)
+        );
+        CREATE TABLE IF NOT EXISTS {prefix}war_settings (
+            guild_id BIGINT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (guild_id, key)
+        );
+    """
+    if not postgres:
+        return tables
+    # The bot connects as the owner. Neither table needs a public Data API policy.
+    return ("CREATE SCHEMA IF NOT EXISTS sunset_war; "
+            "REVOKE ALL ON SCHEMA sunset_war FROM PUBLIC; " + tables +
+            "ALTER TABLE sunset_war.war_stock "
+            "ADD COLUMN IF NOT EXISTS iron INTEGER NOT NULL DEFAULT 0 CHECK (iron >= 0), "
+            "ADD COLUMN IF NOT EXISTS arrows INTEGER NOT NULL DEFAULT 0 CHECK (arrows >= 0); "
+            "ALTER TABLE sunset_war.war_stock ENABLE ROW LEVEL SECURITY; "
+            "ALTER TABLE sunset_war.war_settings ENABLE ROW LEVEL SECURITY;")
 
 
 async def init_db():
@@ -254,6 +293,7 @@ async def init_db():
             )
 
             # ── Migrations for existing databases ──
+            await conn.execute(war_schema(True))
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -377,6 +417,13 @@ async def init_db():
                 """
             )
             # Soft migrations
+            await db.executescript(war_schema(False))
+            async with db.execute("PRAGMA table_info(war_stock)") as cursor:
+                existing = {row[1] for row in await cursor.fetchall()}
+            for column in ("iron", "arrows"):
+                if column not in existing:
+                    await db.execute(f"ALTER TABLE war_stock ADD COLUMN {column} INTEGER "
+                                     f"NOT NULL DEFAULT 0 CHECK ({column} >= 0)")
             for migration in [
                 "ALTER TABLE lands ADD COLUMN guild_id INTEGER DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN bonus_members INTEGER DEFAULT 0",

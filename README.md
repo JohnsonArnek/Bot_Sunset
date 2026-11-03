@@ -1,4 +1,98 @@
-# Sunset bot: Render failover
+# Sunset bot
+
+## Strategic war reserves (Discord administrators)
+
+Start with `/war stock-set location:North Keep hay:7 diamonds:30`. Each supplied
+material replaces its own balance. Omitted materials keep their previous
+balances (zero in a new depot). Location names ignore capitalization and repeated spaces. Use
+`/war stock-list` to see balances, or `/war stock-remove` to retire a depot.
+Only Discord Administrators can use these commands, including reads and
+estimates. Replies are private, and each server has its own stock and rules.
+
+For `stock-set`, `stock-add` and `stock-subtract`, enter hay, diamonds, iron or arrows in
+whichever units you counted. A bare number means individual items. A stack
+or chest means **full of that one resource**, using the server's current
+packing rules. Combine quantities with `+` for a partial chest or stack.
+
+| What you counted at North Keep | Command | Balance after this step (default capacities) |
+| --- | --- | --- |
+| Initial count: a double chest of hay and two stacks of diamonds | `/war stock-set location:North Keep hay:1 double chest diamonds:2 stacks` | 3,456 hay, 128 diamonds |
+| Delivery: three stacks of hay plus five loose bales | `/war stock-add location:North Keep hay:3 stacks + 5` | 3,653 hay, 128 diamonds |
+| Used one chest of hay and ten diamonds | `/war stock-subtract location:North Keep hay:1 chest diamonds:10` | 1,925 hay, 118 diamonds |
+
+Use `stock-set` for a recount (specify at least one material; zero clears it).
+Add and subtract take any combination of materials and require an existing depot.
+If any amount is unavailable or would exceed the depot limit, no balance
+changes. A withdrawal to zero keeps the depot listed; `stock-remove`
+deletes the depot. Balances are saved as individual items, so changing stack
+or chest sizes later does not change stock already recorded.
+
+**Iron and defence.** Iron is recorded in ingots. One block is always nine
+ingots. For example, `/war stock-add location:North Keep iron:2 blocks + 5 ingots arrows:1 stack`
+adds 23 ingots and, with the default stack size, 64 arrows. For iron, a
+bare stack or chest counts ingots; use `1 stack of blocks` or `1 chest of blocks`
+for compacted stock. `/war defence location:North Keep` shows transferable
+defence: 23 ingots make two whole blocks for **200 defence**, leaving five
+ingots. Add `points:250` to see that a third block is needed (four more ingots).
+Omit the location to pool iron across depots. The check never deducts iron.
+Set the rate with `/war config defence_per_block:125`; the default is 100.
+
+**Arrows** appear in depot balances for accounting only. They do not affect
+defence, conquest, transport, or storage estimates. Iron does not change the
+time or materials needed to conquer a settlement.
+
+`/war conquerable hp:2400 players:5` compares the required supplies with all
+recorded locations. Add `location:North Keep` to check only that depot. With
+the defaults, five attackers land 600 hits in 120 volleys. From the first hit
+to the last takes **59.5 seconds**. Each attacker needs two axes and four
+loaves, so the group needs **30 diamonds and 7 hay**. A shortage is reported
+separately for each material. Planning never deducts stock.
+
+Use `/war logistics location:North Keep` for the space and loads needed to
+move that depot's recorded hay, loose diamonds and iron (packed as loose ingots). Omit the location for the
+minimum if all depots are consolidated. Each slot holds up to **64 of one
+item**: 960 hay fills 15 slots, but 960 hay **and one diamond** needs 16.
+That's **two donkey loads or one chest-boat load**, and fits in **one single
+chest** (16 of its 27 slots). With no cargo, all estimates are zero.
+
+| Carrier or storage | Default slots | Hay if filled with hay only |
+| --- | ---: | ---: |
+| Donkey | 15 | 960 |
+| Boat with chest | 27 | 1,728 |
+| Single chest | 27 | 1,728 |
+| Double chest | 54 | 3,456 |
+
+One load means one carrier making one trip. Transport options are alternatives.
+`/war conquerable` estimates loads for the **required** cargo: ship either the
+raw materials or the finished axes and required bread. Each axe occupies its
+own slot; bread stacks like hay. The five-attacker example above needs two
+slots raw or eleven slots crafted. To change capacities, use `/war config`
+with `stack_size` (1–64), `donkey_slots`, `chest_boat_slots`, `chest_slots`,
+or `double_chest_slots`.
+
+Use `/war config` to see the current rules or, for example,
+`/war config rehit_seconds:0.75 axe_durability:80` to update just those values.
+Every value below is configurable per server:
+
+| Axe and attack | Default | Food | Default |
+| --- | ---: | --- | ---: |
+| Diamonds per axe | 3 | Loaves per hay bale | 3 |
+| Durability (hits per axe) | 60 | Hunger restored per loaf | 3 |
+| Damage per hit | 4 HP | Hits per hunger charge | 5 |
+| Delay between hits | 0.5 s | Hunger lost per charge | 0.5 |
+
+The estimate splits hits as evenly as possible among simultaneous attackers.
+The first volley lands immediately. Each attacker starts with fresh axes and
+is provisioned to replace the hunger lost after each complete group of hits;
+partial groups incur no charge. Axes and loaves round up **per attacker**.
+Loaves from a bale can be distributed across the group. The estimate excludes
+travel, crafting, missed hits, eating time, and existing equipment or food.
+
+Storage is created during normal bot startup on both SQLite and PostgreSQL.
+On PostgreSQL the bot owns two RLS-enabled tables in the private `sunset_war`
+schema; no public Data API access or new environment variables are required.
+
+## Render failover
 
 Two Render web services can share the same Discord token and Supabase database.
 Set `FAILOVER_ENABLED=true` on **both**. Only the elected leader connects to
