@@ -1,4 +1,44 @@
-# Sunset bot: Render failover
+# Sunset bot
+
+## Strategic war reserves (Discord administrators)
+
+Start with `/war stock-set location:North Keep hay:7 diamonds:30`. Both numbers
+are the current contents of that location; setting it again replaces those
+counts. Location names ignore capitalization and repeated spaces. Use
+`/war stock-list` to see balances, or `/war stock-remove` to retire a depot.
+Only Discord Administrators can use these commands, including reads and
+estimates. Replies are private, and each server has its own stock and rules.
+
+`/war conquerable hp:2400 players:5` compares the required supplies with all
+recorded locations. Add `location:North Keep` to check only that depot. With
+the defaults, five attackers land 600 hits in 120 volleys. From the first hit
+to the last takes **59.5 seconds**. Each attacker needs two axes and four
+loaves, so the group needs **30 diamonds and 7 hay**. A shortage is reported
+separately for each material. Planning never deducts stock.
+
+Use `/war config` to see the current rules or, for example,
+`/war config rehit_seconds:0.75 axe_durability:80` to update just those values.
+Every value below is configurable per server:
+
+| Axe and attack | Default | Food | Default |
+| --- | ---: | --- | ---: |
+| Diamonds per axe | 3 | Loaves per hay bale | 3 |
+| Durability (hits per axe) | 60 | Hunger restored per loaf | 3 |
+| Damage per hit | 4 HP | Hits per hunger charge | 5 |
+| Delay between hits | 0.5 s | Hunger lost per charge | 0.5 |
+
+The estimate splits hits as evenly as possible among simultaneous attackers.
+The first volley lands immediately. Each attacker starts with fresh axes and
+is provisioned to replace the hunger lost after each complete group of hits;
+partial groups incur no charge. Axes and loaves round up **per attacker**.
+Loaves from a bale can be distributed across the group. The estimate excludes
+travel, crafting, missed hits, eating time, and existing equipment or food.
+
+Storage is created during normal bot startup on both SQLite and PostgreSQL.
+On PostgreSQL the bot owns two RLS-enabled tables in the private `sunset_war`
+schema; no public Data API access or new environment variables are required.
+
+## Render failover
 
 Two Render web services can share the same Discord token and Supabase database.
 Set `FAILOVER_ENABLED=true` on **both**. Only the elected leader connects to

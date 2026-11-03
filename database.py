@@ -139,6 +139,33 @@ class DBConnection:
                 yield
 
 
+def war_schema(postgres: bool) -> str:
+    prefix = "sunset_war." if postgres else ""
+    tables = f"""
+        CREATE TABLE IF NOT EXISTS {prefix}war_stock (
+            guild_id BIGINT NOT NULL,
+            location_key TEXT NOT NULL,
+            location TEXT NOT NULL,
+            hay INTEGER NOT NULL CHECK (hay >= 0),
+            diamonds INTEGER NOT NULL CHECK (diamonds >= 0),
+            PRIMARY KEY (guild_id, location_key)
+        );
+        CREATE TABLE IF NOT EXISTS {prefix}war_settings (
+            guild_id BIGINT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (guild_id, key)
+        );
+    """
+    if not postgres:
+        return tables
+    # The bot connects as the owner. Neither table needs a public Data API policy.
+    return ("CREATE SCHEMA IF NOT EXISTS sunset_war; "
+            "REVOKE ALL ON SCHEMA sunset_war FROM PUBLIC; " + tables +
+            "ALTER TABLE sunset_war.war_stock ENABLE ROW LEVEL SECURITY; "
+            "ALTER TABLE sunset_war.war_settings ENABLE ROW LEVEL SECURITY;")
+
+
 async def init_db():
     """Create all tables if they don't exist and run schema migrations. Called on startup."""
     if IS_POSTGRES:
@@ -254,6 +281,7 @@ async def init_db():
             )
 
             # ── Migrations for existing databases ──
+            await conn.execute(war_schema(True))
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -377,6 +405,7 @@ async def init_db():
                 """
             )
             # Soft migrations
+            await db.executescript(war_schema(False))
             for migration in [
                 "ALTER TABLE lands ADD COLUMN guild_id INTEGER DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN bonus_members INTEGER DEFAULT 0",
