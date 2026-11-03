@@ -21,6 +21,7 @@ class WarRules:
     chest_boat_slots: int = 27
     chest_slots: int = 27
     double_chest_slots: int = 54
+    defence_per_block: int = 100
 
     def __post_init__(self):
         if self.stack_size > 64:
@@ -44,13 +45,16 @@ def _round_up(quantity: int, capacity: int) -> int:
 
 
 MAX_DEPOT_ITEMS = 2_000_000_000
+IRON_PER_BLOCK = 9
 _STOCK_TERM = re.compile(
-    r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*(items?|stacks?|(?:single\s+|double\s+)?chests?)?",
+    r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*"
+    r"(items?|(?:iron\s+)?ingots?|(?:iron\s+)?blocks?|stacks?|(?:single\s+|double\s+)?chests?)?"
+    r"(?:\s+of\s+(?:iron\s+)?(blocks?))?",
     re.IGNORECASE,
 )
 
 
-def stock_quantity(text: str, rules: WarRules) -> int:
+def stock_quantity(text: str, rules: WarRules, *, iron: bool = False) -> int:
     """Convert full containers and loose items of one resource to an exact count."""
     total = 0
     if len(text) > 100:
@@ -59,15 +63,36 @@ def stock_quantity(text: str, rules: WarRules) -> int:
         match = _STOCK_TERM.fullmatch(term.strip())
         if not match:
             raise ValueError("Use whole quantities, e.g. 64, 3 stacks, or 1 double chest + 5 items.")
-        unit = " ".join((match[2] or "item").lower().split()).removesuffix("s")
-        size = {"item": 1, "stack": rules.stack_size,
+        unit = " ".join((match[2] or "item").lower().split()).removeprefix("iron ").removesuffix("s")
+        packed_blocks = bool(match[3])
+        if not iron and (packed_blocks or unit in ("ingot", "block")):
+            raise ValueError("Only iron can be counted in ingots or blocks.")
+        if packed_blocks and unit not in ("stack", "chest", "single chest", "double chest"):
+            raise ValueError("Use a stack or chest for packed blocks, e.g. 1 stack of blocks.")
+        size = {"item": 1, "ingot": 1, "block": IRON_PER_BLOCK, "stack": rules.stack_size,
                 "chest": rules.chest_slots * rules.stack_size,
                 "single chest": rules.chest_slots * rules.stack_size,
                 "double chest": rules.double_chest_slots * rules.stack_size}[unit]
-        total += int(match[1].replace(",", "")) * size
+        total += int(match[1].replace(",", "")) * size * (IRON_PER_BLOCK if packed_blocks else 1)
         if total > MAX_DEPOT_ITEMS:
             raise ValueError(f"The maximum is {MAX_DEPOT_ITEMS:,} items per resource per depot.")
     return total
+
+
+@dataclass(frozen=True)
+class DefenceTransfer:
+    blocks: int
+    remaining_ingots: int
+    capacity: int
+    required_blocks: int
+    missing_ingots: int
+
+
+def defence_transfer(iron: int, rules: WarRules, points: int = 0) -> DefenceTransfer:
+    blocks, remainder = divmod(iron, IRON_PER_BLOCK)
+    needed = _round_up(points, rules.defence_per_block)
+    return DefenceTransfer(blocks, remainder, blocks * rules.defence_per_block,
+                           needed, max(0, needed * IRON_PER_BLOCK - iron))
 
 
 @dataclass(frozen=True)
@@ -79,11 +104,11 @@ class Packing:
     double_chests: int
 
 
-def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, axes: int = 0, bread: int = 0) -> Packing:
+def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, iron: int = 0, axes: int = 0, bread: int = 0) -> Packing:
     """Minimum space when consolidated: partial stacks of different items never mix."""
-    if min(hay, diamonds, axes, bread) < 0:
+    if min(hay, diamonds, iron, axes, bread) < 0:
         raise ValueError("Cargo quantities cannot be negative.")
-    slots = axes + sum(_round_up(n, rules.stack_size) for n in (hay, diamonds, bread))
+    slots = axes + sum(_round_up(n, rules.stack_size) for n in (hay, diamonds, iron, bread))
     return Packing(
         slots=slots,
         donkey_loads=_round_up(slots, rules.donkey_slots),

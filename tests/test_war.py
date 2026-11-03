@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
@@ -14,10 +15,22 @@ from discord import app_commands
 import database
 import war_store as stock
 from cogs.war import WarCog
-from war_planner import MAX_DEPOT_ITEMS, Packing, WarRules, estimate, pack, stock_quantity
+from war_planner import MAX_DEPOT_ITEMS, Packing, WarRules, defence_transfer, estimate, pack, stock_quantity
 
 
 class Estimates(unittest.TestCase):
+    def test_iron_input_and_defence_thresholds(self):
+        rules = WarRules()
+        self.assertEqual(stock_quantity("2 blocks + 5 ingots", rules, iron=True), 23)
+        self.assertEqual(stock_quantity("1 chest of iron blocks + 1 stack", rules, iron=True), 27*64*9+64)
+        for invalid in ("3 blocks", "1 stack of blocks"):
+            with self.assertRaises(ValueError):
+                stock_quantity(invalid, rules)  # iron units are not valid for other resources
+        self.assertEqual(defence_transfer(8, rules).capacity, 0)
+        self.assertEqual(defence_transfer(9, rules).capacity, 100)
+        self.assertEqual(defence_transfer(17, rules, 101).missing_ingots, 1)
+        self.assertEqual(defence_transfer(18, rules, 200).missing_ingots, 0)
+
     def test_depot_input_uses_full_containers_and_loose_remainders(self):
         rules = WarRules(stack_size=16, chest_slots=9, double_chest_slots=18)
         self.assertEqual(stock_quantity("1 DOUBLE Chest + 2 Single Chests + 3 stacks + 5 items", rules), 629)
@@ -83,13 +96,20 @@ async def check_atomic_depot_changes(test, guild):
     withdrawals = await asyncio.gather(*(stock.adjust_stock(guild, "Depot", -80, -2) for _ in range(2)),
                                        return_exceptions=True)
     test.assertEqual(sum(isinstance(r, ValueError) for r in withdrawals), 1)
-    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=40, diamonds=2))
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=40, diamonds=2, iron=0, arrows=0))
     for h, d in [(-1, -3), (MAX_DEPOT_ITEMS, 1), (0, 0)]:
         with test.assertRaises(ValueError):
             await stock.adjust_stock(guild, "Depot", h, d)
-    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=40, diamonds=2))
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=40, diamonds=2, iron=0, arrows=0))
     await stock.adjust_stock(guild, "Depot", -40, -2)
-    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=0, diamonds=0))
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=0, diamonds=0, iron=0, arrows=0))
+    await stock.set_stock(guild, "Depot", iron=18, arrows=16)
+    await stock.set_stock(guild, "Depot", hay=2)
+    with test.assertRaises(ValueError):
+        await stock.adjust_stock(guild, "Depot", iron=-9, arrows=-17)
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=2, diamonds=0, iron=18, arrows=16))
+    await stock.adjust_stock(guild, "Depot", arrows=-16, iron=-9)
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=2, diamonds=0, iron=9, arrows=0))
 
 
 class WarFlow(unittest.IsolatedAsyncioTestCase):
@@ -107,21 +127,62 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_depot_changes(self):
         await check_atomic_depot_changes(self, self.guild)
 
+    async def test_legacy_sqlite_depot_upgrades_without_recount(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        legacy = str(Path(temp.name) / "legacy.db")
+        conn = sqlite3.connect(legacy)
+        try:
+            conn.executescript("""
+                CREATE TABLE war_stock (guild_id BIGINT NOT NULL, location_key TEXT NOT NULL,
+                    location TEXT NOT NULL, hay INTEGER NOT NULL, diamonds INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, location_key));
+                INSERT INTO war_stock VALUES (1001, 'east', 'East', 5, 8);
+            """)
+        finally:
+            conn.close()
+        with patch.object(database, "DB_PATH", legacy):
+            await database.init_db()
+            await database.init_db()
+            self.assertEqual(await stock.available(self.guild, "East"), dict(hay=5, diamonds=8, iron=0, arrows=0))
+
+    async def test_iron_and_arrow_commands_and_planning_scope(self):
+        async def run(cmd, *args, **kwargs):
+            await cmd.callback(self.cog, self.admin, *args, **kwargs)
+            return self.admin.followup.send.await_args.args[0]
+        await run(self.cog.stock_set, "Keep", iron="2 blocks + 5", arrows="1 stack")
+        await run(self.cog.stock_add, "Keep", iron="4 ingots")
+        await run(self.cog.stock_subtract, "Keep", arrows="3")
+        await stock.set_stock(self.guild, "Mine", iron=9)
+        await stock.set_stock(self.guild+1, "Keep", iron=90)
+        await run(self.cog.config, defence_per_block=75)
+        self.assertIn("300 points", await run(self.cog.defence))
+        scoped = await run(self.cog.defence, points=226, location="Keep")
+        self.assertIn("225 points", scoped)
+        self.assertIn("short 9 ingots", scoped)
+        self.assertIn("enough iron", await run(self.cog.defence, points=225, location="Keep"))
+        self.assertIn("No such", await run(self.cog.defence, location="unknown"))
+        self.assertIn("61 arrows", await run(self.cog.stock_list))
+        self.assertIn("1 slot ·", await run(self.cog.logistics, location="Keep"))
+        assault = await run(self.cog.conquerable, 2400, 5)
+        await run(self.cog.stock_set, "Keep", arrows="1 double chest", iron="1 chest of blocks")
+        self.assertEqual(await run(self.cog.conquerable, 2400, 5), assault)
+
     async def test_set_deliver_withdraw_and_reject_without_partial_changes(self):
         await stock.configure(self.guild, {"stack_size": 16, "chest_slots": 9})
         await self.cog.stock_set.callback(self.cog, self.admin, "Base", "2 stacks + 1", "1 chest")
         await self.cog.stock_add.callback(self.cog, self.admin, "BASE", diamonds="1 stack")
         await self.cog.stock_subtract.callback(self.cog, self.admin, "base", hay="1 stack")
-        self.assertIn("17 hay and 160 diamonds", self.admin.followup.send.await_args.args[0])
+        self.assertIn("17 hay · 160 diamonds", self.admin.followup.send.await_args.args[0])
         self.assertTrue(self.admin.followup.send.await_args.kwargs["ephemeral"])
         for hay, diamonds in [("18", "10"), ("1", "0.5 stacks"), (None, None)]:
             await self.cog.stock_subtract.callback(self.cog, self.admin, "Base", hay, diamonds)
-            self.assertEqual(await stock.available(self.guild, "Base"), dict(hay=17, diamonds=160))
+            self.assertEqual(await stock.available(self.guild, "Base"), dict(hay=17, diamonds=160, iron=0, arrows=0))
         await stock.set_stock(self.guild+1, "Other", 10, 10)
         await self.cog.stock_add.callback(self.cog, self.admin, "Other", "1 stack")
         self.assertIn("No such depot", self.admin.followup.send.await_args.args[0])
         self.assertIsNone(await stock.available(self.guild, "Other"))
-        self.assertEqual(await stock.available(self.guild+1, "Other"), dict(hay=10, diamonds=10))
+        self.assertEqual(await stock.available(self.guild+1, "Other"), dict(hay=10, diamonds=10, iron=0, arrows=0))
 
     async def test_every_command_enforces_admin_even_if_visibility_overridden(self):
         group = self.cog.__cog_app_commands_group__
@@ -150,12 +211,12 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
             response = self.admin.followup.send.await_args
             self.assertIn(expected, response.args[0])
             self.assertTrue(response.kwargs["ephemeral"])
-        self.assertEqual(await stock.available(self.guild), dict(hay=7, diamonds=30))
+        self.assertEqual(await stock.available(self.guild), dict(hay=7, diamonds=30, iron=0, arrows=0))
         await stock.set_stock(self.guild, "north keep", 0, 0)
         self.assertEqual(len(await stock.stock_page(self.guild, 1)), 2)
         await stock.remove_stock(self.guild, "North Keep")
         self.assertIsNone(await stock.available(self.guild, "North Keep"))
-        self.assertEqual(await stock.available(self.guild+1, "North Keep"), dict(hay=99, diamonds=99))
+        self.assertEqual(await stock.available(self.guild+1, "North Keep"), dict(hay=99, diamonds=99, iron=0, arrows=0))
 
     async def test_partial_rule_edits_are_guild_scoped_and_reject_invalid_batch(self):
         await stock.configure(self.guild, {"damage_per_hit": "2.5"})
@@ -200,7 +261,7 @@ class WarPostgres(unittest.IsolatedAsyncioTestCase):
         guild = uuid4().int >> 66
         await stock.set_stock(guild, "Main", 5, 3)
         await stock.set_stock(guild, "main", 7, 9)
-        self.assertEqual(await stock.available(guild), dict(hay=7, diamonds=9))
+        self.assertEqual(await stock.available(guild), dict(hay=7, diamonds=9, iron=0, arrows=0))
         rules = await stock.configure(guild, {"axe_durability": 120, "rehit_seconds": "0.75"})
         self.assertEqual((rules.axe_durability, rules.rehit_seconds), (120, Decimal("0.75")))
         async with database.DBConnection() as conn:

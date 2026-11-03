@@ -5,7 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import war_store as stock
-from war_planner import estimate, pack, stock_quantity
+from war_planner import IRON_PER_BLOCK, defence_transfer, estimate, pack, stock_quantity
 
 
 Quantity = app_commands.Range[str, 1, 100]
@@ -42,13 +42,15 @@ depot_options = app_commands.describe(
     location="Depot name or coordinates",
     hay="Hay quantity, e.g. 2 single chests + 3 stacks + 5",
     diamonds="Diamond quantity, e.g. 30, 4 stacks, or 1 double chest",
+    iron="Iron ingots, e.g. 2 blocks + 5 ingots, 1 stack, or 1 chest of blocks",
+    arrows="Arrows for inventory only, e.g. 2 stacks + 4",
 )
 
 
-async def depot_counts(guild_id, hay, diamonds):
+async def depot_counts(guild_id, **entries):
     rules = await stock.rules_for(guild_id)
-    return (stock_quantity(hay, rules) if hay is not None else 0,
-            stock_quantity(diamonds, rules) if diamonds is not None else 0)
+    return {key: stock_quantity(text, rules, iron=key == "iron")
+            for key, text in entries.items() if text is not None}
 
 
 @app_commands.guild_only()
@@ -64,38 +66,39 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         await interaction.response.defer(ephemeral=True)
         return True
 
-    @app_commands.command(name="stock-set", description="Record the actual stock at a named location, replacing its previous counts")
+    @app_commands.command(name="stock-set", description="Set the specified resource balances at a depot; omitted resources keep their counts")
     @depot_options
-    async def stock_set(self, interaction: discord.Interaction, location: Location, hay: Quantity, diamonds: Quantity):
+    async def stock_set(self, interaction: discord.Interaction, location: Location, hay: Quantity = None,
+                        diamonds: Quantity = None, iron: Quantity = None, arrows: Quantity = None):
         try:
-            hay, diamonds = await depot_counts(interaction.guild_id, hay, diamonds)
-            name = await stock.set_stock(interaction.guild_id, location, hay, diamonds)
+            counts = await depot_counts(interaction.guild_id, hay=hay, diamonds=diamonds, iron=iron, arrows=arrows)
+            row = await stock.set_stock(interaction.guild_id, location, **counts)
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        await reply(interaction, f"**{label(name)}** now holds {hay:,} hay and {diamonds:,} diamonds.")
+        await reply(interaction, f"**{label(row['location'])}** now holds {stock.balances(row)}.")
 
-    @app_commands.command(name="stock-add", description="Add a delivery of hay or diamonds to an existing depot")
+    @app_commands.command(name="stock-add", description="Add a delivery of resources to an existing depot")
     @depot_options
     async def stock_add(self, interaction: discord.Interaction, location: Location,
-                        hay: Quantity = None, diamonds: Quantity = None):
-        await self._adjust(interaction, location, hay, diamonds, withdraw=False)
+                        hay: Quantity = None, diamonds: Quantity = None, iron: Quantity = None, arrows: Quantity = None):
+        await self._adjust(interaction, location, withdraw=False, hay=hay, diamonds=diamonds, iron=iron, arrows=arrows)
 
-    @app_commands.command(name="stock-subtract", description="Withdraw hay or diamonds from an existing depot")
+    @app_commands.command(name="stock-subtract", description="Withdraw resources from an existing depot")
     @depot_options
     async def stock_subtract(self, interaction: discord.Interaction, location: Location,
-                             hay: Quantity = None, diamonds: Quantity = None):
-        await self._adjust(interaction, location, hay, diamonds, withdraw=True)
+                             hay: Quantity = None, diamonds: Quantity = None, iron: Quantity = None, arrows: Quantity = None):
+        await self._adjust(interaction, location, withdraw=True, hay=hay, diamonds=diamonds, iron=iron, arrows=arrows)
 
-    async def _adjust(self, interaction, location, hay, diamonds, *, withdraw):
+    async def _adjust(self, interaction, location, *, withdraw, **entries):
         try:
-            h, d = await depot_counts(interaction.guild_id, hay, diamonds)
+            counts = await depot_counts(interaction.guild_id, **entries)
             sign = -1 if withdraw else 1
-            balance = await stock.adjust_stock(interaction.guild_id, location, sign * h, sign * d)
+            balance = await stock.adjust_stock(interaction.guild_id, location, **{k: sign * n for k, n in counts.items()})
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        changed = " and ".join(f"{n:,} {item}" for n, item in [(h, "hay"), (d, "diamonds")] if n)
+        changed = " and ".join(f"{n:,} {'iron ingots' if k == 'iron' else k}" for k, n in counts.items() if n)
         await reply(interaction, f"{'Withdrew' if withdraw else 'Added'} {changed}. "
-                    f"**{label(balance['location'])}** now holds {balance['hay']:,} hay and {balance['diamonds']:,} diamonds.")
+                    f"**{label(balance['location'])}** now holds {stock.balances(balance)}.")
 
     @app_commands.command(name="stock-remove", description="Remove one location and its stock from this server's reserves")
     async def stock_remove(self, interaction: discord.Interaction, location: Location):
@@ -111,10 +114,9 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         if not rows:
             return await reply(interaction, "No locations on this page. Use /war stock-set to record supplies.")
         totals = await stock.available(interaction.guild_id)
-        lines = [f"**All reserves:** {totals['hay']:,} hay · {totals['diamonds']:,} diamonds",
-                 f"Locations · page {page} (8 per page)"]
-        lines.extend(f"**{label(r['location'])}**: {r['hay']:,} hay · {r['diamonds']:,} diamonds" for r in rows)
-        lines.append("Use /war logistics for transport and chest space.")
+        lines = [f"**All reserves:** {stock.balances(totals)}", f"Locations · page {page} (6 per page)"]
+        lines.extend(f"**{label(r['location'])}**: {stock.balances(r)}" for r in rows)
+        lines.append("Use /war logistics for transport and chest space, or /war defence for iron transfer capacity.")
         await reply(interaction, "\n".join(lines))
 
     @app_commands.command(description="Estimate transport loads and chest space for the supplies in stock")
@@ -127,15 +129,40 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         if held is None:
             return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
         rules = await stock.rules_for(interaction.guild_id)
-        cargo = pack(rules, **held)
+        cargo = pack(rules, hay=held["hay"], diamonds=held["diamonds"], iron=held["iron"])
         scope = label(location) if location is not None else "all depots, if pooled"
         await reply(interaction,
                     f"**Packing estimate: {scope}**\n"
-                    f"{held['hay']:,} hay · {held['diamonds']:,} diamonds · up to {rules.stack_size} of one item per slot\n"
+                    f"{held['hay']:,} hay · {held['diamonds']:,} diamonds · {held['iron']:,} loose iron ingots\n"
+                    f"Up to {rules.stack_size} of one item per slot. Arrows excluded (inventory only).\n"
                     f"Transport: {transport(cargo)}.\n"
                     f"Storage: {units(cargo.single_chests, 'single chest', 'single chests')} "
                     f"({rules.chest_slots} slots each) or {units(cargo.double_chests, 'double chest', 'double chests')} "
                     f"({rules.double_chest_slots} slots each).")
+
+    @app_commands.command(description="Estimate transferable defence from iron; optionally check a target amount")
+    @app_commands.describe(location="Use this depot; omit to pool all iron on this server",
+                           points="Defence points you want to transfer")
+    async def defence(self, interaction: discord.Interaction, points: app_commands.Range[int, 1, 2**53 - 1] = None,
+                      location: Location = None):
+        try:
+            held = await stock.available(interaction.guild_id, location)
+        except ValueError as exc:
+            return await reply(interaction, str(exc))
+        if held is None:
+            return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
+        rules = await stock.rules_for(interaction.guild_id)
+        plan = defence_transfer(held["iron"], rules, points or 0)
+        scope = label(location) if location is not None else "all depots, if pooled"
+        lines = [f"**Transferable defence: {plan.capacity:,} points** · {scope}",
+                 f"{held['iron']:,} ingots = {plan.blocks:,} whole blocks + {plan.remaining_ingots} loose ingots. "
+                 f"Each block transfers {rules.defence_per_block:,} defence."]
+        if points is not None:
+            verdict = f"short {plan.missing_ingots:,} ingots" if plan.missing_ingots else "enough iron"
+            lines.append(f"For {points:,} defence: {plan.required_blocks:,} blocks "
+                         f"({plan.required_blocks * IRON_PER_BLOCK:,} ingots) · {verdict}.")
+        lines.append("Estimate only; no stock deducted.")
+        await reply(interaction, "\n".join(lines))
 
     @app_commands.command(description="Show this server's war rules, or update only the options you supply")
     @app_commands.describe(
@@ -144,7 +171,8 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         bread_per_hay="Loaves crafted from one hay bale", hunger_per_bread="Hunger points restored per loaf",
         hits_per_hunger_loss="Hits per attacker before each hunger charge",
         hunger_loss="Hunger points lost per charge (0 disables food requirements)",
-        stack_size="Items per stack for hay, loose diamonds and bread (maximum 64)",
+        stack_size="Items per stack for depot input and packing (maximum 64)",
+        defence_per_block="Defence transferable per full iron block (9 ingots)",
         donkey_slots="Stacks per donkey load", chest_boat_slots="Stacks per chest-boat load",
         chest_slots="Slots per single chest", double_chest_slots="Slots per double chest",
     )
@@ -155,13 +183,13 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                      hunger_loss: app_commands.Range[float, 0.0, 1_000_000.0] = None,
                      stack_size: app_commands.Range[int, 1, 64] = None, donkey_slots: PositiveCount = None,
                      chest_boat_slots: PositiveCount = None, chest_slots: PositiveCount = None,
-                     double_chest_slots: PositiveCount = None):
+                     double_chest_slots: PositiveCount = None, defence_per_block: PositiveCount = None):
         options = dict(diamonds_per_axe=diamonds_per_axe, axe_durability=axe_durability,
                        damage_per_hit=damage_per_hit, rehit_seconds=rehit_seconds,
                        bread_per_hay=bread_per_hay, hunger_per_bread=hunger_per_bread,
                        hits_per_hunger_loss=hits_per_hunger_loss, hunger_loss=hunger_loss, stack_size=stack_size,
                        donkey_slots=donkey_slots, chest_boat_slots=chest_boat_slots,
-                       chest_slots=chest_slots, double_chest_slots=double_chest_slots)
+                       chest_slots=chest_slots, double_chest_slots=double_chest_slots, defence_per_block=defence_per_block)
         try:
             rules = await stock.configure(interaction.guild_id, {k: v for k, v in options.items() if v is not None})
         except ValueError as exc:
@@ -174,7 +202,8 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                     f"Each attacker loses {rules.hunger_loss} hunger every {rules.hits_per_hunger_loss} hits.\n"
                     f"Packing: {rules.stack_size} per stack · slots per donkey: {rules.donkey_slots}, "
                     f"chest boat: {rules.chest_boat_slots}, single chest: {rules.chest_slots}, "
-                    f"double chest: {rules.double_chest_slots}.")
+                    f"double chest: {rules.double_chest_slots}.\n"
+                    f"Iron: {rules.defence_per_block:,} defence per block ({IRON_PER_BLOCK} ingots).")
 
     @app_commands.command(description="Estimate the time and check whether recorded supplies cover a settlement assault")
     @app_commands.describe(hp="Remaining settlement HP", players="Number of simultaneous attackers",

@@ -2,14 +2,14 @@
 
 ## Strategic war reserves (Discord administrators)
 
-Start with `/war stock-set location:North Keep hay:7 diamonds:30`. Both numbers
-are the current contents of that location; setting it again replaces those
-counts. Location names ignore capitalization and repeated spaces. Use
+Start with `/war stock-set location:North Keep hay:7 diamonds:30`. Each supplied
+material replaces its own balance. Omitted materials keep their previous
+balances (zero in a new depot). Location names ignore capitalization and repeated spaces. Use
 `/war stock-list` to see balances, or `/war stock-remove` to retire a depot.
 Only Discord Administrators can use these commands, including reads and
 estimates. Replies are private, and each server has its own stock and rules.
 
-For `stock-set`, `stock-add` and `stock-subtract`, enter hay and diamonds in
+For `stock-set`, `stock-add` and `stock-subtract`, enter hay, diamonds, iron or arrows in
 whichever units you counted. A bare number means individual items. A stack
 or chest means **full of that one resource**, using the server's current
 packing rules. Combine quantities with `+` for a partial chest or stack.
@@ -20,12 +20,26 @@ packing rules. Combine quantities with `+` for a partial chest or stack.
 | Delivery: three stacks of hay plus five loose bales | `/war stock-add location:North Keep hay:3 stacks + 5` | 3,653 hay, 128 diamonds |
 | Used one chest of hay and ten diamonds | `/war stock-subtract location:North Keep hay:1 chest diamonds:10` | 1,925 hay, 118 diamonds |
 
-Use `stock-set` for a recount (enter both materials, including zeros).
-Add and subtract take either or both materials and require an existing depot.
-If either amount is unavailable or would exceed the depot limit, neither
-balance changes. A withdrawal to zero keeps the depot listed; `stock-remove`
+Use `stock-set` for a recount (specify at least one material; zero clears it).
+Add and subtract take any combination of materials and require an existing depot.
+If any amount is unavailable or would exceed the depot limit, no balance
+changes. A withdrawal to zero keeps the depot listed; `stock-remove`
 deletes the depot. Balances are saved as individual items, so changing stack
 or chest sizes later does not change stock already recorded.
+
+**Iron and defence.** Iron is recorded in ingots. One block is always nine
+ingots. For example, `/war stock-add location:North Keep iron:2 blocks + 5 ingots arrows:1 stack`
+adds 23 ingots and, with the default stack size, 64 arrows. For iron, a
+bare stack or chest counts ingots; use `1 stack of blocks` or `1 chest of blocks`
+for compacted stock. `/war defence location:North Keep` shows transferable
+defence: 23 ingots make two whole blocks for **200 defence**, leaving five
+ingots. Add `points:250` to see that a third block is needed (four more ingots).
+Omit the location to pool iron across depots. The check never deducts iron.
+Set the rate with `/war config defence_per_block:125`; the default is 100.
+
+**Arrows** appear in depot balances for accounting only. They do not affect
+defence, conquest, transport, or storage estimates. Iron does not change the
+time or materials needed to conquer a settlement.
 
 `/war conquerable hp:2400 players:5` compares the required supplies with all
 recorded locations. Add `location:North Keep` to check only that depot. With
@@ -35,7 +49,7 @@ loaves, so the group needs **30 diamonds and 7 hay**. A shortage is reported
 separately for each material. Planning never deducts stock.
 
 Use `/war logistics location:North Keep` for the space and loads needed to
-move that depot's recorded hay and loose diamonds. Omit the location for the
+move that depot's recorded hay, loose diamonds and iron (packed as loose ingots). Omit the location for the
 minimum if all depots are consolidated. Each slot holds up to **64 of one
 item**: 960 hay fills 15 slots, but 960 hay **and one diamond** needs 16.
 That's **two donkey loads or one chest-boat load**, and fits in **one single

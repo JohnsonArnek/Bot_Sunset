@@ -4,6 +4,14 @@ import database as db
 from war_planner import MAX_DEPOT_ITEMS, WarRules
 
 
+RESOURCES = ("hay", "diamonds", "iron", "arrows")
+_COLUMNS = ", ".join(RESOURCES)
+
+
+def balances(row):
+    return " · ".join(f"{row[k]:,} {'iron ingots' if k == 'iron' else k}" for k in RESOURCES)
+
+
 def _prefix():
     return "sunset_war." if db.IS_POSTGRES else ""
 
@@ -15,46 +23,51 @@ def clean_location(name):
     return name
 
 
-async def set_stock(guild, location, hay, diamonds):
+async def set_stock(guild, location, hay=None, diamonds=None, iron=None, arrows=None):
     name = clean_location(location)
-    if not all(0 <= amount <= MAX_DEPOT_ITEMS for amount in (hay, diamonds)):
+    amounts = dict(zip(RESOURCES, (hay, diamonds, iron, arrows)))
+    supplied = [key for key in RESOURCES if amounts[key] is not None]
+    if not supplied:
+        raise ValueError("Enter at least one resource to set.")
+    if not all(0 <= amounts[key] <= MAX_DEPOT_ITEMS for key in supplied):
         raise ValueError(f"Depot balances must be between 0 and {MAX_DEPOT_ITEMS:,} items.")
+    updates = ", ".join(f"{key}=excluded.{key}" for key in supplied)
     async with db.DBConnection() as conn:
-        await conn.execute(
-            f"INSERT INTO {_prefix()}war_stock (guild_id, location_key, location, hay, diamonds) "
-            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (guild_id, location_key) DO UPDATE SET "
-            "location=excluded.location, hay=excluded.hay, diamonds=excluded.diamonds",
-            (guild, name.casefold(), name, hay, diamonds),
+        return await conn.execute_returning_one(
+            f"INSERT INTO {_prefix()}war_stock (guild_id, location_key, location, {_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (guild_id, location_key) DO UPDATE SET "
+            f"location=excluded.location, {updates} RETURNING location, {_COLUMNS}",
+            (guild, name.casefold(), name, *(amounts[k] or 0 for k in RESOURCES)),
         )
-    return name
 
 
-async def adjust_stock(guild, location, hay_delta, diamond_delta):
-    """Change both resources or neither; return this operation's resulting balance."""
+async def adjust_stock(guild, location, hay=0, diamonds=0, iron=0, arrows=0):
+    """Apply all deltas or none; return this operation's resulting balance."""
     name = clean_location(location)
-    if not (hay_delta or diamond_delta):
-        raise ValueError("Enter a nonzero quantity of hay or diamonds.")
-    if max(abs(hay_delta), abs(diamond_delta)) > MAX_DEPOT_ITEMS:
+    deltas = (hay, diamonds, iron, arrows)
+    if not any(deltas):
+        raise ValueError("Enter a nonzero quantity of at least one resource.")
+    if max(map(abs, deltas)) > MAX_DEPOT_ITEMS:
         raise ValueError(f"The maximum change is {MAX_DEPOT_ITEMS:,} items per resource.")
     table = _prefix() + "war_stock"
     key = (guild, name.casefold())
+    updates = ", ".join(f"{k}={k}+?" for k in RESOURCES)
+    guards = " AND ".join(f"{k} BETWEEN ? AND ?" for k in RESOURCES)
+    bounds = tuple(n for d in deltas for n in (max(0, -d), MAX_DEPOT_ITEMS - max(0, d)))
     async with db.DBConnection() as conn:
         # Compare the existing balances before adding, so even PostgreSQL INTEGER
         # cannot overflow. Concurrent adjustments serialize on this depot row.
         row = await conn.execute_returning_one(
-            f"UPDATE {table} SET hay=hay+?, diamonds=diamonds+? WHERE guild_id=? AND location_key=? "
-            "AND hay BETWEEN ? AND ? AND diamonds BETWEEN ? AND ? RETURNING location, hay, diamonds",
-            (hay_delta, diamond_delta, *key,
-             max(0, -hay_delta), MAX_DEPOT_ITEMS - max(0, hay_delta),
-             max(0, -diamond_delta), MAX_DEPOT_ITEMS - max(0, diamond_delta)),
+            f"UPDATE {table} SET {updates} WHERE guild_id=? AND location_key=? "
+            f"AND {guards} RETURNING location, {_COLUMNS}", (*deltas, *key, *bounds),
         )
         if row is not None:
             return row
-        held = await conn.fetchone(f"SELECT hay, diamonds FROM {table} WHERE guild_id=? AND location_key=?", key)
+        held = await conn.fetchone(f"SELECT {_COLUMNS} FROM {table} WHERE guild_id=? AND location_key=?", key)
     if held is None:
         raise ValueError("No such depot on this server. Use /war stock-set to record it first.")
-    reason = "Not enough stock" if min(hay_delta, diamond_delta) < 0 else f"Depot limit: {MAX_DEPOT_ITEMS:,} per resource"
-    raise ValueError(f"{reason}. Nothing changed. Current balance: {held['hay']:,} hay and {held['diamonds']:,} diamonds.")
+    reason = "Not enough stock" if min(deltas) < 0 else f"Depot limit: {MAX_DEPOT_ITEMS:,} per resource"
+    raise ValueError(f"{reason}. Nothing changed. Current balance: {balances(held)}.")
 
 
 async def remove_stock(guild, location):
@@ -65,10 +78,10 @@ async def remove_stock(guild, location):
                            (guild, clean_location(location).casefold()))
 
 
-async def stock_page(guild, page, size=8):
+async def stock_page(guild, page, size=6):
     async with db.DBConnection() as conn:
         return await conn.fetchall(
-            f"SELECT location, hay, diamonds FROM {_prefix()}war_stock WHERE guild_id=? "
+            f"SELECT location, {_COLUMNS} FROM {_prefix()}war_stock WHERE guild_id=? "
             "ORDER BY location_key LIMIT ? OFFSET ?", (guild, size, (page - 1) * size),
         )
 
@@ -77,13 +90,11 @@ async def available(guild, location=None):
     async with db.DBConnection() as conn:
         if location is not None:
             return await conn.fetchone(
-                f"SELECT hay, diamonds FROM {_prefix()}war_stock WHERE guild_id=? AND location_key=?",
+                f"SELECT {_COLUMNS} FROM {_prefix()}war_stock WHERE guild_id=? AND location_key=?",
                 (guild, clean_location(location).casefold()),
             )
-        return await conn.fetchone(
-            f"SELECT COALESCE(SUM(hay),0) AS hay, COALESCE(SUM(diamonds),0) AS diamonds "
-            f"FROM {_prefix()}war_stock WHERE guild_id=?", (guild,),
-        )
+        totals = ", ".join(f"COALESCE(SUM({k}),0) AS {k}" for k in RESOURCES)
+        return await conn.fetchone(f"SELECT {totals} FROM {_prefix()}war_stock WHERE guild_id=?", (guild,))
 
 
 async def rules_for(guild):
