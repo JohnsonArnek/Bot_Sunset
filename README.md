@@ -16,6 +16,28 @@ to the last takes **59.5 seconds**. Each attacker needs two axes and four
 loaves, so the group needs **30 diamonds and 7 hay**. A shortage is reported
 separately for each material. Planning never deducts stock.
 
+Use `/war logistics location:North Keep` for the space and loads needed to
+move that depot's recorded hay and loose diamonds. Omit the location for the
+minimum if all depots are consolidated. Each slot holds up to **64 of one
+item**: 960 hay fills 15 slots, but 960 hay **and one diamond** needs 16.
+That's **two donkey loads or one chest-boat load**, and fits in **one single
+chest** (16 of its 27 slots). With no cargo, all estimates are zero.
+
+| Carrier or storage | Default slots | Hay if filled with hay only |
+| --- | ---: | ---: |
+| Donkey | 15 | 960 |
+| Boat with chest | 27 | 1,728 |
+| Single chest | 27 | 1,728 |
+| Double chest | 54 | 3,456 |
+
+One load means one carrier making one trip. Transport options are alternatives.
+`/war conquerable` estimates loads for the **required** cargo: ship either the
+raw materials or the finished axes and required bread. Each axe occupies its
+own slot; bread stacks like hay. The five-attacker example above needs two
+slots raw or eleven slots crafted. To change capacities, use `/war config`
+with `stack_size` (1–64), `donkey_slots`, `chest_boat_slots`, `chest_slots`,
+or `double_chest_slots`.
+
 Use `/war config` to see the current rules or, for example,
 `/war config rehit_seconds:0.75 axe_durability:80` to update just those values.
 Every value below is configurable per server:

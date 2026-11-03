@@ -5,7 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import war_store as stock
-from war_planner import estimate
+from war_planner import estimate, pack
 
 
 Count = app_commands.Range[int, 0, 2_000_000_000]
@@ -26,6 +26,16 @@ def supply(name, needed, held):
     balance = held - needed
     detail = f"{balance:,} left" if balance >= 0 else f"short {-balance:,}"
     return f"{name}: need **{needed:,}** · have **{held:,}** · {detail}"
+
+
+def units(n, singular, plural):
+    return f"{n:,} {singular if n == 1 else plural}"
+
+
+def transport(cargo):
+    return (f"{units(cargo.slots, 'slot', 'slots')} · "
+            f"{units(cargo.donkey_loads, 'donkey load', 'donkey loads')} or "
+            f"{units(cargo.chest_boat_loads, 'chest-boat load', 'chest-boat loads')}")
 
 
 @app_commands.guild_only()
@@ -67,7 +77,28 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         lines = [f"**All reserves:** {totals['hay']:,} hay · {totals['diamonds']:,} diamonds",
                  f"Locations · page {page} (8 per page)"]
         lines.extend(f"**{label(r['location'])}**: {r['hay']:,} hay · {r['diamonds']:,} diamonds" for r in rows)
+        lines.append("Use /war logistics for transport and chest space.")
         await reply(interaction, "\n".join(lines))
+
+    @app_commands.command(description="Estimate transport loads and chest space for the supplies in stock")
+    @app_commands.describe(location="Depot to pack; omit to estimate all supplies consolidated in one place")
+    async def logistics(self, interaction: discord.Interaction, location: Location = None):
+        try:
+            held = await stock.available(interaction.guild_id, location)
+        except ValueError as exc:
+            return await reply(interaction, str(exc))
+        if held is None:
+            return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
+        rules = await stock.rules_for(interaction.guild_id)
+        cargo = pack(rules, **held)
+        scope = label(location) if location is not None else "all depots, if pooled"
+        await reply(interaction,
+                    f"**Packing estimate: {scope}**\n"
+                    f"{held['hay']:,} hay · {held['diamonds']:,} diamonds · up to {rules.stack_size} of one item per slot\n"
+                    f"Transport: {transport(cargo)}.\n"
+                    f"Storage: {units(cargo.single_chests, 'single chest', 'single chests')} "
+                    f"({rules.chest_slots} slots each) or {units(cargo.double_chests, 'double chest', 'double chests')} "
+                    f"({rules.double_chest_slots} slots each).")
 
     @app_commands.command(description="Show this server's war rules, or update only the options you supply")
     @app_commands.describe(
@@ -76,16 +107,24 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         bread_per_hay="Loaves crafted from one hay bale", hunger_per_bread="Hunger points restored per loaf",
         hits_per_hunger_loss="Hits per attacker before each hunger charge",
         hunger_loss="Hunger points lost per charge (0 disables food requirements)",
+        stack_size="Items per stack for hay, loose diamonds and bread (maximum 64)",
+        donkey_slots="Stacks per donkey load", chest_boat_slots="Stacks per chest-boat load",
+        chest_slots="Slots per single chest", double_chest_slots="Slots per double chest",
     )
     async def config(self, interaction: discord.Interaction, diamonds_per_axe: PositiveCount = None,
                      axe_durability: PositiveCount = None, damage_per_hit: Rate = None,
                      rehit_seconds: Rate = None, bread_per_hay: PositiveCount = None,
                      hunger_per_bread: Rate = None, hits_per_hunger_loss: PositiveCount = None,
-                     hunger_loss: app_commands.Range[float, 0.0, 1_000_000.0] = None):
+                     hunger_loss: app_commands.Range[float, 0.0, 1_000_000.0] = None,
+                     stack_size: app_commands.Range[int, 1, 64] = None, donkey_slots: PositiveCount = None,
+                     chest_boat_slots: PositiveCount = None, chest_slots: PositiveCount = None,
+                     double_chest_slots: PositiveCount = None):
         options = dict(diamonds_per_axe=diamonds_per_axe, axe_durability=axe_durability,
                        damage_per_hit=damage_per_hit, rehit_seconds=rehit_seconds,
                        bread_per_hay=bread_per_hay, hunger_per_bread=hunger_per_bread,
-                       hits_per_hunger_loss=hits_per_hunger_loss, hunger_loss=hunger_loss)
+                       hits_per_hunger_loss=hits_per_hunger_loss, hunger_loss=hunger_loss, stack_size=stack_size,
+                       donkey_slots=donkey_slots, chest_boat_slots=chest_boat_slots,
+                       chest_slots=chest_slots, double_chest_slots=double_chest_slots)
         try:
             rules = await stock.configure(interaction.guild_id, {k: v for k, v in options.items() if v is not None})
         except ValueError as exc:
@@ -95,7 +134,10 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                     f"Axe: {rules.diamonds_per_axe} diamonds · {rules.axe_durability} hits · "
                     f"{rules.damage_per_hit} HP per hit · {rules.rehit_seconds} s between hits.\n"
                     f"Food: {rules.bread_per_hay} bread per hay · {rules.hunger_per_bread} hunger per bread. "
-                    f"Each attacker loses {rules.hunger_loss} hunger every {rules.hits_per_hunger_loss} hits.")
+                    f"Each attacker loses {rules.hunger_loss} hunger every {rules.hits_per_hunger_loss} hits.\n"
+                    f"Packing: {rules.stack_size} per stack · slots per donkey: {rules.donkey_slots}, "
+                    f"chest boat: {rules.chest_boat_slots}, single chest: {rules.chest_slots}, "
+                    f"double chest: {rules.double_chest_slots}.")
 
     @app_commands.command(description="Estimate the time and check whether recorded supplies cover a settlement assault")
     @app_commands.describe(hp="Remaining settlement HP", players="Number of simultaneous attackers",
@@ -108,7 +150,10 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
             return await reply(interaction, str(exc))
         if held is None:
             return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
-        plan = estimate(hp, players, await stock.rules_for(interaction.guild_id))
+        rules = await stock.rules_for(interaction.guild_id)
+        plan = estimate(hp, players, rules)
+        raw = pack(rules, hay=plan.hay, diamonds=plan.diamonds)
+        gear = pack(rules, axes=plan.axes, bread=plan.bread)
         enough = held["diamonds"] >= plan.diamonds and held["hay"] >= plan.hay
         verdict = "Enough supplies" if enough else "Insufficient supplies"
         scope = label(location) if location is not None else "all reserve locations"
@@ -118,6 +163,9 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                     f"**Time if equipped: {plan.seconds:,f} s** from first hit to last.\n"
                     f"{supply('Diamonds', plan.diamonds, held['diamonds'])} ({plan.axes:,} axes)\n"
                     f"{supply('Hay', plan.hay, held['hay'])} ({plan.bread:,} loaves needed)\n"
+                    f"**Transport for this assault** (choose one manifest):\n"
+                    f"Raw hay and diamonds: {transport(raw)}.\n"
+                    f"Crafted axes and required loaves: {transport(gear)}.\n"
                     "Assumes uninterrupted attacks, fresh axes and enough bread per attacker to restore lost hunger. "
                     "Travel, crafting and eating time excluded. No stock deducted.")
 

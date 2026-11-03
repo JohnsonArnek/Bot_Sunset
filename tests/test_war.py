@@ -14,10 +14,31 @@ from discord import app_commands
 import database
 import war_store as stock
 from cogs.war import WarCog
-from war_planner import WarRules, estimate
+from war_planner import Packing, WarRules, estimate, pack
 
 
 class Estimates(unittest.TestCase):
+    def test_pack_empty_mixed_and_container_boundaries(self):
+        rules = WarRules()
+        for hay, diamonds, expected in [
+            (0, 0, Packing(0, 0, 0, 0, 0)),
+            (1, 1, Packing(2, 1, 1, 1, 1)),
+            (960, 0, Packing(15, 1, 1, 1, 1)),
+            (960, 1, Packing(16, 2, 1, 1, 1)),
+            (1728, 0, Packing(27, 2, 1, 1, 1)),
+            (1729, 0, Packing(28, 2, 2, 2, 1)),
+            (3456, 0, Packing(54, 4, 2, 2, 1)),
+            (3457, 0, Packing(55, 4, 3, 3, 2)),
+        ]:
+            with self.subTest(hay=hay, diamonds=diamonds):
+                self.assertEqual(pack(rules, hay=hay, diamonds=diamonds), expected)
+
+    def test_crafted_axes_take_individual_slots_and_capacities_are_independent(self):
+        rules = WarRules(stack_size=16, donkey_slots=6, chest_boat_slots=8, chest_slots=10, double_chest_slots=12)
+        self.assertEqual(pack(rules, axes=15, bread=17), Packing(17, 3, 3, 2, 2))
+        with self.assertRaises(ValueError):
+            WarRules(stack_size=65)
+
     def test_five_equipped_attackers(self):
         plan = estimate(2400, 5, WarRules())
         self.assertEqual((plan.hits, plan.volleys, plan.seconds), (600, 120, Decimal("59.5")))
@@ -100,6 +121,26 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         rules = await stock.rules_for(self.guild)
         self.assertEqual((rules.damage_per_hit, rules.hunger_loss), (Decimal("2.5"), 0))
         self.assertEqual(await stock.rules_for(self.guild+1), WarRules())
+
+    async def test_logistics_uses_scoped_stock_and_assault_uses_only_its_requirements(self):
+        await stock.set_stock(self.guild, "Keep", 960, 0)
+        await stock.set_stock(self.guild, "Mine", 1, 30)
+        await stock.set_stock(self.guild+1, "Mine", 99999, 99999)
+        cmd = self.cog.logistics
+        for location, expected in [("Keep", "15 slots · 1 donkey load"), (None, "17 slots · 2 donkey loads"),
+                                   ("Missing", "No such reserve location")]:
+            await cmd.callback(self.cog, self.admin, location)
+            response = self.admin.followup.send.await_args
+            self.assertIn(expected, response.args[0])
+            self.assertTrue(response.kwargs["ephemeral"])
+        await stock.configure(self.guild, {"donkey_slots": 2, "chest_slots": 8})
+        await cmd.callback(self.cog, self.admin, "Keep")
+        self.assertIn("8 donkey loads", self.admin.followup.send.await_args.args[0])
+        self.assertIn("2 single chests", self.admin.followup.send.await_args.args[0])
+        await self.cog.conquerable.callback(self.cog, self.admin, 2400, 5)
+        manifest = self.admin.followup.send.await_args.args[0]
+        self.assertIn("Raw hay and diamonds: 2 slots · 1 donkey load", manifest)
+        self.assertIn("Crafted axes and required loaves: 11 slots · 6 donkey loads", manifest)
 
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "needs a disposable PostgreSQL database")

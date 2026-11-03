@@ -15,8 +15,15 @@ class WarRules:
     hunger_per_bread: Decimal = Decimal("3")
     hits_per_hunger_loss: int = 5
     hunger_loss: Decimal = Decimal("0.5")
+    stack_size: int = 64
+    donkey_slots: int = 15
+    chest_boat_slots: int = 27
+    chest_slots: int = 27
+    double_chest_slots: int = 54
 
     def __post_init__(self):
+        if self.stack_size > 64:
+            raise ValueError("A stack can hold at most 64 items.")
         for key, value in vars(self).items():
             if not 0 <= value <= 1_000_000 or (value == 0 and key != "hunger_loss"):
                 raise ValueError(f"{key} is outside the allowed range.")
@@ -29,6 +36,33 @@ class WarRules:
             key: type(default)(str(settings[key]))
             for key, default in vars(cls()).items() if key in settings
         })
+
+
+def _round_up(quantity: int, capacity: int) -> int:
+    return (quantity + capacity - 1) // capacity
+
+
+@dataclass(frozen=True)
+class Packing:
+    slots: int
+    donkey_loads: int
+    chest_boat_loads: int
+    single_chests: int
+    double_chests: int
+
+
+def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, axes: int = 0, bread: int = 0) -> Packing:
+    """Minimum space when consolidated: partial stacks of different items never mix."""
+    if min(hay, diamonds, axes, bread) < 0:
+        raise ValueError("Cargo quantities cannot be negative.")
+    slots = axes + sum(_round_up(n, rules.stack_size) for n in (hay, diamonds, bread))
+    return Packing(
+        slots=slots,
+        donkey_loads=_round_up(slots, rules.donkey_slots),
+        chest_boat_loads=_round_up(slots, rules.chest_boat_slots),
+        single_chests=_round_up(slots, rules.chest_slots),
+        double_chests=_round_up(slots, rules.double_chest_slots),
+    )
 
 
 @dataclass(frozen=True)
