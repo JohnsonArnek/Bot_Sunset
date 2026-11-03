@@ -1,7 +1,7 @@
 """Guild-scoped storage for the admin war commands, using the bot's fenced connection."""
 
 import database as db
-from war_planner import WarRules
+from war_planner import MAX_DEPOT_ITEMS, WarRules
 
 
 def _prefix():
@@ -17,6 +17,8 @@ def clean_location(name):
 
 async def set_stock(guild, location, hay, diamonds):
     name = clean_location(location)
+    if not all(0 <= amount <= MAX_DEPOT_ITEMS for amount in (hay, diamonds)):
+        raise ValueError(f"Depot balances must be between 0 and {MAX_DEPOT_ITEMS:,} items.")
     async with db.DBConnection() as conn:
         await conn.execute(
             f"INSERT INTO {_prefix()}war_stock (guild_id, location_key, location, hay, diamonds) "
@@ -25,6 +27,34 @@ async def set_stock(guild, location, hay, diamonds):
             (guild, name.casefold(), name, hay, diamonds),
         )
     return name
+
+
+async def adjust_stock(guild, location, hay_delta, diamond_delta):
+    """Change both resources or neither; return this operation's resulting balance."""
+    name = clean_location(location)
+    if not (hay_delta or diamond_delta):
+        raise ValueError("Enter a nonzero quantity of hay or diamonds.")
+    if max(abs(hay_delta), abs(diamond_delta)) > MAX_DEPOT_ITEMS:
+        raise ValueError(f"The maximum change is {MAX_DEPOT_ITEMS:,} items per resource.")
+    table = _prefix() + "war_stock"
+    key = (guild, name.casefold())
+    async with db.DBConnection() as conn:
+        # Compare the existing balances before adding, so even PostgreSQL INTEGER
+        # cannot overflow. Concurrent adjustments serialize on this depot row.
+        row = await conn.execute_returning_one(
+            f"UPDATE {table} SET hay=hay+?, diamonds=diamonds+? WHERE guild_id=? AND location_key=? "
+            "AND hay BETWEEN ? AND ? AND diamonds BETWEEN ? AND ? RETURNING location, hay, diamonds",
+            (hay_delta, diamond_delta, *key,
+             max(0, -hay_delta), MAX_DEPOT_ITEMS - max(0, hay_delta),
+             max(0, -diamond_delta), MAX_DEPOT_ITEMS - max(0, diamond_delta)),
+        )
+        if row is not None:
+            return row
+        held = await conn.fetchone(f"SELECT hay, diamonds FROM {table} WHERE guild_id=? AND location_key=?", key)
+    if held is None:
+        raise ValueError("No such depot on this server. Use /war stock-set to record it first.")
+    reason = "Not enough stock" if min(hay_delta, diamond_delta) < 0 else f"Depot limit: {MAX_DEPOT_ITEMS:,} per resource"
+    raise ValueError(f"{reason}. Nothing changed. Current balance: {held['hay']:,} hay and {held['diamonds']:,} diamonds.")
 
 
 async def remove_stock(guild, location):

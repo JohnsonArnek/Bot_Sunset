@@ -5,10 +5,10 @@ from discord import app_commands
 from discord.ext import commands
 
 import war_store as stock
-from war_planner import estimate, pack
+from war_planner import estimate, pack, stock_quantity
 
 
-Count = app_commands.Range[int, 0, 2_000_000_000]
+Quantity = app_commands.Range[str, 1, 100]
 PositiveCount = app_commands.Range[int, 1, 1_000_000]
 Rate = app_commands.Range[float, 0.001, 1_000_000.0]
 Location = app_commands.Range[str, 1, 64]
@@ -38,6 +38,19 @@ def transport(cargo):
             f"{units(cargo.chest_boat_loads, 'chest-boat load', 'chest-boat loads')}")
 
 
+depot_options = app_commands.describe(
+    location="Depot name or coordinates",
+    hay="Hay quantity, e.g. 2 single chests + 3 stacks + 5",
+    diamonds="Diamond quantity, e.g. 30, 4 stacks, or 1 double chest",
+)
+
+
+async def depot_counts(guild_id, hay, diamonds):
+    rules = await stock.rules_for(guild_id)
+    return (stock_quantity(hay, rules) if hay is not None else 0,
+            stock_quantity(diamonds, rules) if diamonds is not None else 0)
+
+
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 class WarCog(commands.GroupCog, name="war", group_description="Manage strategic reserves and plan a settlement assault"):
@@ -52,13 +65,37 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         return True
 
     @app_commands.command(name="stock-set", description="Record the actual stock at a named location, replacing its previous counts")
-    @app_commands.describe(location="Depot name or coordinates", hay="Whole hay bales here", diamonds="Loose diamonds here")
-    async def stock_set(self, interaction: discord.Interaction, location: Location, hay: Count, diamonds: Count):
+    @depot_options
+    async def stock_set(self, interaction: discord.Interaction, location: Location, hay: Quantity, diamonds: Quantity):
         try:
+            hay, diamonds = await depot_counts(interaction.guild_id, hay, diamonds)
             name = await stock.set_stock(interaction.guild_id, location, hay, diamonds)
         except ValueError as exc:
             return await reply(interaction, str(exc))
         await reply(interaction, f"**{label(name)}** now holds {hay:,} hay and {diamonds:,} diamonds.")
+
+    @app_commands.command(name="stock-add", description="Add a delivery of hay or diamonds to an existing depot")
+    @depot_options
+    async def stock_add(self, interaction: discord.Interaction, location: Location,
+                        hay: Quantity = None, diamonds: Quantity = None):
+        await self._adjust(interaction, location, hay, diamonds, withdraw=False)
+
+    @app_commands.command(name="stock-subtract", description="Withdraw hay or diamonds from an existing depot")
+    @depot_options
+    async def stock_subtract(self, interaction: discord.Interaction, location: Location,
+                             hay: Quantity = None, diamonds: Quantity = None):
+        await self._adjust(interaction, location, hay, diamonds, withdraw=True)
+
+    async def _adjust(self, interaction, location, hay, diamonds, *, withdraw):
+        try:
+            h, d = await depot_counts(interaction.guild_id, hay, diamonds)
+            sign = -1 if withdraw else 1
+            balance = await stock.adjust_stock(interaction.guild_id, location, sign * h, sign * d)
+        except ValueError as exc:
+            return await reply(interaction, str(exc))
+        changed = " and ".join(f"{n:,} {item}" for n, item in [(h, "hay"), (d, "diamonds")] if n)
+        await reply(interaction, f"{'Withdrew' if withdraw else 'Added'} {changed}. "
+                    f"**{label(balance['location'])}** now holds {balance['hay']:,} hay and {balance['diamonds']:,} diamonds.")
 
     @app_commands.command(name="stock-remove", description="Remove one location and its stock from this server's reserves")
     async def stock_remove(self, interaction: discord.Interaction, location: Location):

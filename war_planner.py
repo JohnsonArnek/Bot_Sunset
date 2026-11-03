@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from math import ceil
+import re
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,33 @@ class WarRules:
 
 def _round_up(quantity: int, capacity: int) -> int:
     return (quantity + capacity - 1) // capacity
+
+
+MAX_DEPOT_ITEMS = 2_000_000_000
+_STOCK_TERM = re.compile(
+    r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*(items?|stacks?|(?:single\s+|double\s+)?chests?)?",
+    re.IGNORECASE,
+)
+
+
+def stock_quantity(text: str, rules: WarRules) -> int:
+    """Convert full containers and loose items of one resource to an exact count."""
+    total = 0
+    if len(text) > 100:
+        raise ValueError("Keep each quantity to 100 characters or fewer.")
+    for term in text.split("+"):
+        match = _STOCK_TERM.fullmatch(term.strip())
+        if not match:
+            raise ValueError("Use whole quantities, e.g. 64, 3 stacks, or 1 double chest + 5 items.")
+        unit = " ".join((match[2] or "item").lower().split()).removesuffix("s")
+        size = {"item": 1, "stack": rules.stack_size,
+                "chest": rules.chest_slots * rules.stack_size,
+                "single chest": rules.chest_slots * rules.stack_size,
+                "double chest": rules.double_chest_slots * rules.stack_size}[unit]
+        total += int(match[1].replace(",", "")) * size
+        if total > MAX_DEPOT_ITEMS:
+            raise ValueError(f"The maximum is {MAX_DEPOT_ITEMS:,} items per resource per depot.")
+    return total
 
 
 @dataclass(frozen=True)

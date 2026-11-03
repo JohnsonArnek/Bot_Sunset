@@ -130,6 +130,13 @@ class DBConnection:
                 rows = await cur.fetchall()
                 return [dict(r) for r in rows]
 
+    async def execute_returning_one(self, query: str, params: tuple = ()) -> dict | None:
+        """Run a single-row mutation with RETURNING and commit it on both backends."""
+        row = await self.fetchone(query, params)
+        if not IS_POSTGRES:
+            await self.sqlite_conn.commit()
+        return row
+
     @asynccontextmanager
     async def _fenced(self):
         if leader_lease is None:

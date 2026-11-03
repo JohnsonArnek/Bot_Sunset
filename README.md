@@ -9,6 +9,24 @@ counts. Location names ignore capitalization and repeated spaces. Use
 Only Discord Administrators can use these commands, including reads and
 estimates. Replies are private, and each server has its own stock and rules.
 
+For `stock-set`, `stock-add` and `stock-subtract`, enter hay and diamonds in
+whichever units you counted. A bare number means individual items. A stack
+or chest means **full of that one resource**, using the server's current
+packing rules. Combine quantities with `+` for a partial chest or stack.
+
+| What you counted at North Keep | Command | Balance after this step (default capacities) |
+| --- | --- | --- |
+| Initial count: a double chest of hay and two stacks of diamonds | `/war stock-set location:North Keep hay:1 double chest diamonds:2 stacks` | 3,456 hay, 128 diamonds |
+| Delivery: three stacks of hay plus five loose bales | `/war stock-add location:North Keep hay:3 stacks + 5` | 3,653 hay, 128 diamonds |
+| Used one chest of hay and ten diamonds | `/war stock-subtract location:North Keep hay:1 chest diamonds:10` | 1,925 hay, 118 diamonds |
+
+Use `stock-set` for a recount (enter both materials, including zeros).
+Add and subtract take either or both materials and require an existing depot.
+If either amount is unavailable or would exceed the depot limit, neither
+balance changes. A withdrawal to zero keeps the depot listed; `stock-remove`
+deletes the depot. Balances are saved as individual items, so changing stack
+or chest sizes later does not change stock already recorded.
+
 `/war conquerable hp:2400 players:5` compares the required supplies with all
 recorded locations. Add `location:North Keep` to check only that depot. With
 the defaults, five attackers land 600 hits in 120 volleys. From the first hit

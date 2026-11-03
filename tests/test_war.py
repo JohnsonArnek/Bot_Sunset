@@ -14,10 +14,19 @@ from discord import app_commands
 import database
 import war_store as stock
 from cogs.war import WarCog
-from war_planner import Packing, WarRules, estimate, pack
+from war_planner import MAX_DEPOT_ITEMS, Packing, WarRules, estimate, pack, stock_quantity
 
 
 class Estimates(unittest.TestCase):
+    def test_depot_input_uses_full_containers_and_loose_remainders(self):
+        rules = WarRules(stack_size=16, chest_slots=9, double_chest_slots=18)
+        self.assertEqual(stock_quantity("1 DOUBLE Chest + 2 Single Chests + 3 stacks + 5 items", rules), 629)
+        self.assertEqual(stock_quantity("1 chest + 1", rules), 145)
+        self.assertEqual(stock_quantity("2,000,000,000", rules), MAX_DEPOT_ITEMS)
+        for text in ("", "1.5 stacks", "-2", "5 +", "1 donkey", "1,23", "2000000001", "2000000000 chests"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                stock_quantity(text, rules)
+
     def test_pack_empty_mixed_and_container_boundaries(self):
         rules = WarRules()
         for hay, diamonds, expected in [
@@ -67,6 +76,22 @@ class Estimates(unittest.TestCase):
             WarRules.from_settings({"hunger_per_bread": "0"})
 
 
+async def check_atomic_depot_changes(test, guild):
+    await stock.set_stock(guild, "Depot", 0, 4)
+    results = await asyncio.gather(*(stock.adjust_stock(guild, "depot", 60, 0) for _ in range(2)))
+    test.assertEqual(sorted(row["hay"] for row in results), [60, 120])
+    withdrawals = await asyncio.gather(*(stock.adjust_stock(guild, "Depot", -80, -2) for _ in range(2)),
+                                       return_exceptions=True)
+    test.assertEqual(sum(isinstance(r, ValueError) for r in withdrawals), 1)
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=40, diamonds=2))
+    for h, d in [(-1, -3), (MAX_DEPOT_ITEMS, 1), (0, 0)]:
+        with test.assertRaises(ValueError):
+            await stock.adjust_stock(guild, "Depot", h, d)
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=40, diamonds=2))
+    await stock.adjust_stock(guild, "Depot", -40, -2)
+    test.assertEqual(await stock.available(guild, "Depot"), dict(hay=0, diamonds=0))
+
+
 class WarFlow(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -78,6 +103,25 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         self.guild = 1001
         self.admin = SimpleNamespace(guild_id=self.guild, permissions=discord.Permissions(administrator=True),
                                      response=AsyncMock(), followup=AsyncMock())
+
+    async def test_atomic_depot_changes(self):
+        await check_atomic_depot_changes(self, self.guild)
+
+    async def test_set_deliver_withdraw_and_reject_without_partial_changes(self):
+        await stock.configure(self.guild, {"stack_size": 16, "chest_slots": 9})
+        await self.cog.stock_set.callback(self.cog, self.admin, "Base", "2 stacks + 1", "1 chest")
+        await self.cog.stock_add.callback(self.cog, self.admin, "BASE", diamonds="1 stack")
+        await self.cog.stock_subtract.callback(self.cog, self.admin, "base", hay="1 stack")
+        self.assertIn("17 hay and 160 diamonds", self.admin.followup.send.await_args.args[0])
+        self.assertTrue(self.admin.followup.send.await_args.kwargs["ephemeral"])
+        for hay, diamonds in [("18", "10"), ("1", "0.5 stacks"), (None, None)]:
+            await self.cog.stock_subtract.callback(self.cog, self.admin, "Base", hay, diamonds)
+            self.assertEqual(await stock.available(self.guild, "Base"), dict(hay=17, diamonds=160))
+        await stock.set_stock(self.guild+1, "Other", 10, 10)
+        await self.cog.stock_add.callback(self.cog, self.admin, "Other", "1 stack")
+        self.assertIn("No such depot", self.admin.followup.send.await_args.args[0])
+        self.assertIsNone(await stock.available(self.guild, "Other"))
+        self.assertEqual(await stock.available(self.guild+1, "Other"), dict(hay=10, diamonds=10))
 
     async def test_every_command_enforces_admin_even_if_visibility_overridden(self):
         group = self.cog.__cog_app_commands_group__
@@ -166,3 +210,4 @@ class WarPostgres(unittest.IsolatedAsyncioTestCase):
                 FROM pg_class c WHERE c.relnamespace='sunset_war'::regnamespace AND c.relkind='r'
             """)
         self.assertEqual(row, dict(rls=True, tables=2, public_usage=False))
+        await check_atomic_depot_changes(self, guild)
