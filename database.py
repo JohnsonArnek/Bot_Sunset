@@ -157,6 +157,7 @@ def war_schema(postgres: bool) -> str:
             diamonds INTEGER NOT NULL CHECK (diamonds >= 0),
             iron INTEGER NOT NULL DEFAULT 0 CHECK (iron >= 0),
             arrows INTEGER NOT NULL DEFAULT 0 CHECK (arrows >= 0),
+            logs INTEGER NOT NULL DEFAULT 0 CHECK (logs >= 0),
             PRIMARY KEY (guild_id, location_key)
         );
         CREATE TABLE IF NOT EXISTS {prefix}war_settings (
@@ -173,7 +174,8 @@ def war_schema(postgres: bool) -> str:
             "REVOKE ALL ON SCHEMA sunset_war FROM PUBLIC; " + tables +
             "ALTER TABLE sunset_war.war_stock "
             "ADD COLUMN IF NOT EXISTS iron INTEGER NOT NULL DEFAULT 0 CHECK (iron >= 0), "
-            "ADD COLUMN IF NOT EXISTS arrows INTEGER NOT NULL DEFAULT 0 CHECK (arrows >= 0); "
+            "ADD COLUMN IF NOT EXISTS arrows INTEGER NOT NULL DEFAULT 0 CHECK (arrows >= 0), "
+            "ADD COLUMN IF NOT EXISTS logs INTEGER NOT NULL DEFAULT 0 CHECK (logs >= 0); "
             "ALTER TABLE sunset_war.war_stock ENABLE ROW LEVEL SECURITY; "
             "ALTER TABLE sunset_war.war_settings ENABLE ROW LEVEL SECURITY;")
 
@@ -420,7 +422,7 @@ async def init_db():
             await db.executescript(war_schema(False))
             async with db.execute("PRAGMA table_info(war_stock)") as cursor:
                 existing = {row[1] for row in await cursor.fetchall()}
-            for column in ("iron", "arrows"):
+            for column in ("iron", "arrows", "logs"):
                 if column not in existing:
                     await db.execute(f"ALTER TABLE war_stock ADD COLUMN {column} INTEGER "
                                      f"NOT NULL DEFAULT 0 CHECK ({column} >= 0)")
