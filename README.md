@@ -2,10 +2,16 @@
 
 ## Strategic war reserves (Discord administrators)
 
-Start with `/war stock-set location:North Keep hay:7 diamonds:30 logs:3`. Each supplied
+Start with `/war stock-set location:North Keep hay:7 diamonds:4 blocks logs:3`. Each supplied
 material replaces its own balance. Omitted materials keep their previous
 balances (zero in a new depot). Location names ignore capitalization and repeated spaces. Use
 `/war stock-list` to see balances, or `/war stock-remove` to retire a depot.
+Use `/war stock-list location:North Keep` for one settlement's reserves. The
+ledger leads with double chests, single chests, stacks and loose remainders;
+diamonds and iron use **containers of blocks**. Exact individual-item totals
+remain visible in parentheses. For example, 12,000 hay reads **3 double chests +
+25 stacks + 32 loose hay**; 31,104 diamonds reads **1 double chest of blocks**.
+The full ledger shows three depots per page, plus the server totals.
 Only Discord Administrators can use these commands, including reads and
 estimates. Replies start private, and each server has its own stock and rules.
 Use **Share estimate in this channel** on a conquest, logistics, or targeted
@@ -47,8 +53,8 @@ Set the rate with `/war config defence_per_block:125`; the default is 100.
 commands accept `diamonds:2 blocks + 3`, `diamonds:1 stack of blocks`, or
 `diamonds:1 chest of diamond blocks`. A bare stack or chest still means loose
 diamonds. Block inputs are converted to individual diamonds for accounting;
-diamond blocks do not transfer defence. Packing assumes diamonds and iron are
-loose, regardless of their original input units.
+diamond blocks do not transfer defence. Freight compacts diamonds and iron into
+whole blocks and counts any loose remainder separately, regardless of input units.
 
 **Logs** supply the sticks for diamond axes. The defaults are two sticks per
 axe, four sticks per two planks, and four planks per log. Whole crafting batches
@@ -66,18 +72,21 @@ time or materials needed to conquer a settlement.
 recorded locations. Add `location:North Keep` to check only that depot. With
 the defaults, five attackers land 600 hits in 120 volleys. From the first hit
 to the last takes **59.5 seconds**. Each attacker needs two axes and four
-loaves, so the group needs **30 diamonds, 7 hay and 3 logs**. A shortage is reported
-separately for each material. Planning never deducts stock.
+loaves, consuming **30 diamonds, 7 hay and 3 logs**. The shipment carries **four
+diamond blocks (36 diamonds), 7 hay and 3 logs** and leaves six spare diamonds
+after crafting at the objective. The stock check covers this whole-block shipment,
+so having only 30 diamonds reports a shortage of six. Planning never deducts stock.
 
-Assumptions appear first in each estimate. Resource quantities include full
-stacks, single/double chests and loose remainders when applicable; iron and
-diamonds also show their equivalent block counts. Times use days, hours,
+Assumptions appear first in each estimate. Resource quantities, including depot
+balances, use full stacks, single/double chests and loose remainders; iron and
+diamond containers hold blocks. Times use days, hours,
 minutes and seconds as appropriate (for example, `1d 2h 15m`). Conquest shows
-both carrier loads and storage for raw materials and crafted equipment.
+carrier loads and storage for hay, logs and diamond blocks. Axes and bread are
+crafted at the destination and are not freight options.
 
 **Time from depot to objective.** Add `travel_minutes` (one way) to either
 `/war conquerable` or `/war logistics`. For example,
-`/war conquerable hp:2400 players:5 location:North Keep travel_minutes:12`
+`/war conquerable hp:2400 players:5 location:North Keep mode:donkey travel_minutes:12`
 shows 10 min loading + 12 min travel + 10 min unloading = **32 min until
 supplies are ready**. With 59.5 seconds of combat, that's **32 min 59.5 s
 from loading to conquest**, assuming the attack starts once all supplies arrive.
@@ -85,33 +94,47 @@ Omitting travel time skips route timing; entering zero still includes handling.
 
 Loading and unloading default to **10 minutes each** per convoy trip. Set
 them independently with `/war config loading_minutes:5 unloading_minutes:3`;
-zero and fractional minutes are supported. By default enough carriers travel
-together in one trip. If the convoy shuttles, pass `trips:2` (or more): each
-outbound trip loads and unloads once, and the convoy returns to the depot
-between trips only. With pooled stock, timing starts once the supplies are
-assembled at the departure point; collection from other depots is excluded.
+zero and fractional minutes are supported. Trips are **calculated**, not entered.
+Choose `mode:donkey` (default), `mode:chest_boat`, or `mode:chest_minecart`.
+Donkey/boat modes default to one carrier; set `carriers:2` for two travelling
+together. Trips = cargo slots divided by total convoy slots, rounded up. Each
+outbound trip loads and unloads once, with return travel between trips only.
+Enter the one-way travel time for your chosen transport mode.
+
+Chest minecart mode assumes a prepared rail route and enough carts to send all
+cargo in **one dispatch**, with no returning carts needed. The bot calculates
+the cart count (27 slots each by default); omit `carriers` in this mode. Loading
+and unloading apply once to the whole dispatch. These are planning assumptions,
+not a simulation of rail throughput or individual cart launch times.
+
+For 55 cargo slots, one donkey needs four trips; one chest boat needs three;
+two donkeys need two; rail needs three chest minecarts in one dispatch. At 12
+minutes one way and default handling times, those take **2h 44m**, **2h**, **1h
+16m**, and **32m**, respectively. With pooled stock, timing starts after supplies
+are assembled at departure; collection from other depots is excluded.
 
 Use `/war logistics location:North Keep` for the space and loads needed to
-move that depot's recorded hay, loose diamonds, iron ingots and logs. Omit the location for the
+move that depot's hay, logs, diamond blocks and iron blocks (plus loose remainders). Omit the location for the
 minimum if all depots are consolidated. Each slot holds up to **64 of one
 item**: 960 hay fills 15 slots, but 960 hay **and one diamond** needs 16.
-That's **two donkey loads or one chest-boat load**, and fits in **one single
+That's **two trips with one donkey or one trip with a chest boat**, and fits in **one single
 chest** (16 of its 27 slots). With no cargo, all estimates are zero.
 
 | Carrier or storage | Default slots | Hay if filled with hay only |
 | --- | ---: | ---: |
 | Donkey | 15 | 960 |
 | Boat with chest | 27 | 1,728 |
+| Minecart with chest | 27 per cart | 1,728 per cart |
 | Single chest | 27 | 1,728 |
 | Double chest | 54 | 3,456 |
 
-One load means one carrier making one trip. Transport options are alternatives.
-`/war conquerable` estimates loads for the **required** cargo: ship either the
-raw materials or the finished axes and required bread. Each axe occupies its
-own slot; bread stacks like hay. The five-attacker example above needs three
-slots raw or eleven slots crafted. To change capacities, use `/war config`
-with `stack_size` (1–64), `donkey_slots`, `chest_boat_slots`, `chest_slots`,
-or `double_chest_slots`.
+One load means one carrier making one trip. `/war conquerable` sizes the
+shipment of **hay, logs and whole diamond blocks**, rounding diamonds up to a
+whole block. The five-attacker example occupies three slots and fits on one
+donkey. `/war logistics` packs all recorded stock exactly; full blocks and loose
+diamonds/ingots occupy separate slots, with no rounding up of stock. To change
+capacities, use `/war config` with `stack_size` (1–64), `donkey_slots`,
+`chest_boat_slots`, `chest_minecart_slots`, `chest_slots`, or `double_chest_slots`.
 
 Use `/war config` to see the current rules or, for example,
 `/war config rehit_seconds:0.75 axe_durability:80` to update just those values.

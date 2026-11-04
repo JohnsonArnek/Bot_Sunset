@@ -1,7 +1,7 @@
 """Settlement assault estimates. Quantities are for a fully supplied attack."""
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from math import ceil
 import re
 
@@ -19,6 +19,7 @@ class WarRules:
     stack_size: int = 64
     donkey_slots: int = 15
     chest_boat_slots: int = 27
+    chest_minecart_slots: int = 27
     chest_slots: int = 27
     double_chest_slots: int = 54
     defence_per_block: int = 100
@@ -58,7 +59,12 @@ class DeliveryTime:
 
     @property
     def seconds(self) -> Decimal:
-        return self.loading + self.travel + self.unloading
+        return self.with_combat(Decimal(0))
+
+    def with_combat(self, combat: Decimal) -> Decimal:
+        with localcontext() as context:
+            context.prec = 64  # Covers derived trip counts across all configurable resource limits.
+            return self.loading + self.travel + self.unloading + combat
 
 
 def delivery_time(rules: WarRules, travel_minutes: float, trips: int) -> DeliveryTime:
@@ -66,8 +72,10 @@ def delivery_time(rules: WarRules, travel_minutes: float, trips: int) -> Deliver
     one_way = Decimal(str(travel_minutes))
     if not one_way.is_finite() or not 0 <= one_way <= 1_000_000 or trips < 1:
         raise ValueError("Enter nonnegative one-way travel minutes and at least one trip.")
-    return DeliveryTime(60 * trips * rules.loading_minutes, 60 * (2 * trips - 1) * one_way,
-                        60 * trips * rules.unloading_minutes)
+    with localcontext() as context:
+        context.prec = 64
+        return DeliveryTime(60 * trips * rules.loading_minutes, 60 * (2 * trips - 1) * one_way,
+                            60 * trips * rules.unloading_minutes)
 
 
 MAX_DEPOT_ITEMS = 2_000_000_000
@@ -137,12 +145,19 @@ class Packing:
     double_chests: int
 
 
-def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, iron: int = 0, logs: int = 0,
-         axes: int = 0, bread: int = 0) -> Packing:
-    """Minimum space when consolidated: partial stacks of different items never mix."""
-    if min(hay, diamonds, iron, logs, axes, bread) < 0:
+def block_shipment(diamonds: int) -> int:
+    """Individual diamonds in the whole blocks sent for a conquest."""
+    return _round_up(diamonds, IRON_PER_BLOCK) * IRON_PER_BLOCK
+
+
+def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, iron: int = 0, logs: int = 0) -> Packing:
+    """Compact metals; count any loose remainder in its own slot. Never mix items."""
+    if min(hay, diamonds, iron, logs) < 0:
         raise ValueError("Cargo quantities cannot be negative.")
-    slots = axes + sum(_round_up(n, rules.stack_size) for n in (hay, diamonds, iron, logs, bread))
+    slots = sum(_round_up(n, rules.stack_size) for n in (hay, logs))
+    for count in (diamonds, iron):
+        blocks, loose = divmod(count, IRON_PER_BLOCK)
+        slots += _round_up(blocks, rules.stack_size) + _round_up(loose, rules.stack_size)
     return Packing(
         slots=slots,
         donkey_loads=_round_up(slots, rules.donkey_slots),
@@ -150,6 +165,29 @@ def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, iron: int = 0, log
         single_chests=_round_up(slots, rules.chest_slots),
         double_chests=_round_up(slots, rules.double_chest_slots),
     )
+
+
+@dataclass(frozen=True)
+class TransportPlan:
+    mode: str
+    carriers: int
+    slots_per_carrier: int
+    loads: int
+    trips: int
+
+
+def plan_transport(cargo: Packing, rules: WarRules, mode: str, carriers: int = 1) -> TransportPlan:
+    capacities = {"donkey": rules.donkey_slots, "chest_boat": rules.chest_boat_slots,
+                  "chest_minecart": rules.chest_minecart_slots}
+    if mode not in capacities or carriers < 1:
+        raise ValueError("Choose a transport mode and at least one carrier.")
+    capacity = capacities[mode]
+    loads = _round_up(cargo.slots, capacity)
+    if mode == "chest_minecart":
+        if carriers != 1:
+            raise ValueError("Minecart mode supplies enough carts for one dispatch. Omit carriers.")
+        return TransportPlan(mode, loads, capacity, loads, int(loads > 0))
+    return TransportPlan(mode, carriers, capacity, loads, _round_up(loads, carriers))
 
 
 @dataclass(frozen=True)
