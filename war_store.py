@@ -4,7 +4,7 @@ import database as db
 from war_planner import MAX_DEPOT_ITEMS, WarRules
 
 
-RESOURCES = ("hay", "diamonds", "iron", "arrows")
+RESOURCES = ("hay", "diamonds", "iron", "arrows", "logs")
 _COLUMNS = ", ".join(RESOURCES)
 
 
@@ -23,9 +23,9 @@ def clean_location(name):
     return name
 
 
-async def set_stock(guild, location, hay=None, diamonds=None, iron=None, arrows=None):
+async def set_stock(guild, location, hay=None, diamonds=None, iron=None, arrows=None, logs=None):
     name = clean_location(location)
-    amounts = dict(zip(RESOURCES, (hay, diamonds, iron, arrows)))
+    amounts = dict(zip(RESOURCES, (hay, diamonds, iron, arrows, logs)))
     supplied = [key for key in RESOURCES if amounts[key] is not None]
     if not supplied:
         raise ValueError("Enter at least one resource to set.")
@@ -35,16 +35,16 @@ async def set_stock(guild, location, hay=None, diamonds=None, iron=None, arrows=
     async with db.DBConnection() as conn:
         return await conn.execute_returning_one(
             f"INSERT INTO {_prefix()}war_stock (guild_id, location_key, location, {_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (guild_id, location_key) DO UPDATE SET "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (guild_id, location_key) DO UPDATE SET "
             f"location=excluded.location, {updates} RETURNING location, {_COLUMNS}",
             (guild, name.casefold(), name, *(amounts[k] or 0 for k in RESOURCES)),
         )
 
 
-async def adjust_stock(guild, location, hay=0, diamonds=0, iron=0, arrows=0):
+async def adjust_stock(guild, location, hay=0, diamonds=0, iron=0, arrows=0, logs=0):
     """Apply all deltas or none; return this operation's resulting balance."""
     name = clean_location(location)
-    deltas = (hay, diamonds, iron, arrows)
+    deltas = (hay, diamonds, iron, arrows, logs)
     if not any(deltas):
         raise ValueError("Enter a nonzero quantity of at least one resource.")
     if max(map(abs, deltas)) > MAX_DEPOT_ITEMS:

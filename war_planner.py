@@ -22,12 +22,18 @@ class WarRules:
     chest_slots: int = 27
     double_chest_slots: int = 54
     defence_per_block: int = 100
+    loading_minutes: Decimal = Decimal("10")
+    unloading_minutes: Decimal = Decimal("10")
+    sticks_per_axe: int = 2
+    sticks_per_batch: int = 4
+    planks_per_batch: int = 2
+    planks_per_log: int = 4
 
     def __post_init__(self):
         if self.stack_size > 64:
             raise ValueError("A stack can hold at most 64 items.")
         for key, value in vars(self).items():
-            if not 0 <= value <= 1_000_000 or (value == 0 and key != "hunger_loss"):
+            if not 0 <= value <= 1_000_000 or (value == 0 and key not in {"hunger_loss", "loading_minutes", "unloading_minutes"}):
                 raise ValueError(f"{key} is outside the allowed range.")
             if isinstance(value, Decimal) and value != value.quantize(Decimal("0.001")):
                 raise ValueError(f"{key} accepts at most three decimal places.")
@@ -44,17 +50,37 @@ def _round_up(quantity: int, capacity: int) -> int:
     return (quantity + capacity - 1) // capacity
 
 
+@dataclass(frozen=True)
+class DeliveryTime:
+    loading: Decimal
+    travel: Decimal
+    unloading: Decimal
+
+    @property
+    def seconds(self) -> Decimal:
+        return self.loading + self.travel + self.unloading
+
+
+def delivery_time(rules: WarRules, travel_minutes: float, trips: int) -> DeliveryTime:
+    """Seconds until the last load is unloaded; only intermediate trips return to the depot."""
+    one_way = Decimal(str(travel_minutes))
+    if not one_way.is_finite() or not 0 <= one_way <= 1_000_000 or trips < 1:
+        raise ValueError("Enter nonnegative one-way travel minutes and at least one trip.")
+    return DeliveryTime(60 * trips * rules.loading_minutes, 60 * (2 * trips - 1) * one_way,
+                        60 * trips * rules.unloading_minutes)
+
+
 MAX_DEPOT_ITEMS = 2_000_000_000
 IRON_PER_BLOCK = 9
 _STOCK_TERM = re.compile(
     r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*"
-    r"(items?|(?:iron\s+)?ingots?|(?:iron\s+)?blocks?|stacks?|(?:single\s+|double\s+)?chests?)?"
-    r"(?:\s+of\s+(?:iron\s+)?(blocks?))?",
+    r"(items?|(?:iron\s+)?ingots?|(?:(?:iron|diamond)\s+)?blocks?|stacks?|(?:single\s+|double\s+)?chests?)?"
+    r"(?:\s+of\s+((?:(?:iron|diamond)\s+)?blocks?))?",
     re.IGNORECASE,
 )
 
 
-def stock_quantity(text: str, rules: WarRules, *, iron: bool = False) -> int:
+def stock_quantity(text: str, rules: WarRules, *, iron: bool = False, diamonds: bool = False) -> int:
     """Convert full containers and loose items of one resource to an exact count."""
     total = 0
     if len(text) > 100:
@@ -63,10 +89,17 @@ def stock_quantity(text: str, rules: WarRules, *, iron: bool = False) -> int:
         match = _STOCK_TERM.fullmatch(term.strip())
         if not match:
             raise ValueError("Use whole quantities, e.g. 64, 3 stacks, or 1 double chest + 5 items.")
-        unit = " ".join((match[2] or "item").lower().split()).removeprefix("iron ").removesuffix("s")
+        unit = " ".join((match[2] or "item").lower().split())
+        packed_unit = " ".join((match[3] or "").lower().split())
+        for supplied in (unit, packed_unit):
+            if (supplied.startswith("iron ") and not iron) or (supplied.startswith("diamond ") and not diamonds):
+                raise ValueError("The block material must match the resource being recorded.")
+        unit = unit.removeprefix("iron ").removeprefix("diamond ").removesuffix("s")
         packed_blocks = bool(match[3])
-        if not iron and (packed_blocks or unit in ("ingot", "block")):
-            raise ValueError("Only iron can be counted in ingots or blocks.")
+        if not iron and unit == "ingot":
+            raise ValueError("Only iron can be counted in ingots.")
+        if not (iron or diamonds) and (packed_blocks or unit == "block"):
+            raise ValueError("Only iron and diamonds can be counted in blocks.")
         if packed_blocks and unit not in ("stack", "chest", "single chest", "double chest"):
             raise ValueError("Use a stack or chest for packed blocks, e.g. 1 stack of blocks.")
         size = {"item": 1, "ingot": 1, "block": IRON_PER_BLOCK, "stack": rules.stack_size,
@@ -104,11 +137,12 @@ class Packing:
     double_chests: int
 
 
-def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, iron: int = 0, axes: int = 0, bread: int = 0) -> Packing:
+def pack(rules: WarRules, *, hay: int = 0, diamonds: int = 0, iron: int = 0, logs: int = 0,
+         axes: int = 0, bread: int = 0) -> Packing:
     """Minimum space when consolidated: partial stacks of different items never mix."""
-    if min(hay, diamonds, iron, axes, bread) < 0:
+    if min(hay, diamonds, iron, logs, axes, bread) < 0:
         raise ValueError("Cargo quantities cannot be negative.")
-    slots = axes + sum(_round_up(n, rules.stack_size) for n in (hay, diamonds, iron, bread))
+    slots = axes + sum(_round_up(n, rules.stack_size) for n in (hay, diamonds, iron, logs, bread))
     return Packing(
         slots=slots,
         donkey_loads=_round_up(slots, rules.donkey_slots),
@@ -128,6 +162,9 @@ class Assault:
     diamonds: int
     bread: int
     hay: int
+    sticks: int
+    planks: int
+    logs: int
 
 
 def estimate(hp: int, players: int, rules: WarRules) -> Assault:
@@ -143,5 +180,9 @@ def estimate(hp: int, players: int, rules: WarRules) -> Assault:
         axes += count * (-(-swings // rules.axe_durability))
         hunger = (swings // rules.hits_per_hunger_loss) * rules.hunger_loss
         bread += count * ceil(hunger / rules.hunger_per_bread)
+    sticks = axes * rules.sticks_per_axe
+    planks = _round_up(sticks, rules.sticks_per_batch) * rules.planks_per_batch
+    logs = _round_up(planks, rules.planks_per_log)
     return Assault(hits, attackers, volleys, (volleys - 1) * rules.rehit_seconds,
-                  axes, axes * rules.diamonds_per_axe, bread, -(-bread // rules.bread_per_hay))
+                  axes, axes * rules.diamonds_per_axe, bread, -(-bread // rules.bread_per_hay),
+                  sticks, planks, logs)

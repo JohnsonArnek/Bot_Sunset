@@ -2,14 +2,20 @@
 
 ## Strategic war reserves (Discord administrators)
 
-Start with `/war stock-set location:North Keep hay:7 diamonds:30`. Each supplied
+Start with `/war stock-set location:North Keep hay:7 diamonds:30 logs:3`. Each supplied
 material replaces its own balance. Omitted materials keep their previous
 balances (zero in a new depot). Location names ignore capitalization and repeated spaces. Use
 `/war stock-list` to see balances, or `/war stock-remove` to retire a depot.
 Only Discord Administrators can use these commands, including reads and
-estimates. Replies are private, and each server has its own stock and rules.
+estimates. Replies start private, and each server has its own stock and rules.
+Use **Share estimate in this channel** on a conquest, logistics, or targeted
+defence estimate to publish its calculation and assumptions. Only the requesting
+administrator can share it, within five minutes. Shared posts omit depot names,
+on-hand balances, shortages and the private sufficiency verdict. Logistics shares
+the calculated space, loads and timing, excluding its inventory manifest.
+Sharing preserves the original estimate even if rules or stock change afterwards.
 
-For `stock-set`, `stock-add` and `stock-subtract`, enter hay, diamonds, iron or arrows in
+For `stock-set`, `stock-add` and `stock-subtract`, enter hay, diamonds, iron, arrows or logs in
 whichever units you counted. A bare number means individual items. A stack
 or chest means **full of that one resource**, using the server's current
 packing rules. Combine quantities with `+` for a partial chest or stack.
@@ -37,6 +43,21 @@ ingots. Add `points:250` to see that a third block is needed (four more ingots).
 Omit the location to pool iron across depots. The check never deducts iron.
 Set the rate with `/war config defence_per_block:125`; the default is 100.
 
+**Diamond blocks** also count as nine individual diamonds. All three stock
+commands accept `diamonds:2 blocks + 3`, `diamonds:1 stack of blocks`, or
+`diamonds:1 chest of diamond blocks`. A bare stack or chest still means loose
+diamonds. Block inputs are converted to individual diamonds for accounting;
+diamond blocks do not transfer defence. Packing assumes diamonds and iron are
+loose, regardless of their original input units.
+
+**Logs** supply the sticks for diamond axes. The defaults are two sticks per
+axe, four sticks per two planks, and four planks per log. Whole crafting batches
+are pooled across the group, then rounded up to whole logs. Ten axes need 20
+sticks, consuming 10 planks, so bring **three logs** (two planks remain unused).
+Use `logs:2 stacks + 3` with any stock command. Configure the recipe with
+`sticks_per_axe`, `sticks_per_batch`, `planks_per_batch`, and `planks_per_log`
+under `/war config`. Existing depots start with zero logs until counted.
+
 **Arrows** appear in depot balances for accounting only. They do not affect
 defence, conquest, transport, or storage estimates. Iron does not change the
 time or materials needed to conquer a settlement.
@@ -45,11 +66,33 @@ time or materials needed to conquer a settlement.
 recorded locations. Add `location:North Keep` to check only that depot. With
 the defaults, five attackers land 600 hits in 120 volleys. From the first hit
 to the last takes **59.5 seconds**. Each attacker needs two axes and four
-loaves, so the group needs **30 diamonds and 7 hay**. A shortage is reported
+loaves, so the group needs **30 diamonds, 7 hay and 3 logs**. A shortage is reported
 separately for each material. Planning never deducts stock.
 
+Assumptions appear first in each estimate. Resource quantities include full
+stacks, single/double chests and loose remainders when applicable; iron and
+diamonds also show their equivalent block counts. Times use days, hours,
+minutes and seconds as appropriate (for example, `1d 2h 15m`). Conquest shows
+both carrier loads and storage for raw materials and crafted equipment.
+
+**Time from depot to objective.** Add `travel_minutes` (one way) to either
+`/war conquerable` or `/war logistics`. For example,
+`/war conquerable hp:2400 players:5 location:North Keep travel_minutes:12`
+shows 10 min loading + 12 min travel + 10 min unloading = **32 min until
+supplies are ready**. With 59.5 seconds of combat, that's **32 min 59.5 s
+from loading to conquest**, assuming the attack starts once all supplies arrive.
+Omitting travel time skips route timing; entering zero still includes handling.
+
+Loading and unloading default to **10 minutes each** per convoy trip. Set
+them independently with `/war config loading_minutes:5 unloading_minutes:3`;
+zero and fractional minutes are supported. By default enough carriers travel
+together in one trip. If the convoy shuttles, pass `trips:2` (or more): each
+outbound trip loads and unloads once, and the convoy returns to the depot
+between trips only. With pooled stock, timing starts once the supplies are
+assembled at the departure point; collection from other depots is excluded.
+
 Use `/war logistics location:North Keep` for the space and loads needed to
-move that depot's recorded hay, loose diamonds and iron (packed as loose ingots). Omit the location for the
+move that depot's recorded hay, loose diamonds, iron ingots and logs. Omit the location for the
 minimum if all depots are consolidated. Each slot holds up to **64 of one
 item**: 960 hay fills 15 slots, but 960 hay **and one diamond** needs 16.
 That's **two donkey loads or one chest-boat load**, and fits in **one single
@@ -65,7 +108,7 @@ chest** (16 of its 27 slots). With no cargo, all estimates are zero.
 One load means one carrier making one trip. Transport options are alternatives.
 `/war conquerable` estimates loads for the **required** cargo: ship either the
 raw materials or the finished axes and required bread. Each axe occupies its
-own slot; bread stacks like hay. The five-attacker example above needs two
+own slot; bread stacks like hay. The five-attacker example above needs three
 slots raw or eleven slots crafted. To change capacities, use `/war config`
 with `stack_size` (1–64), `donkey_slots`, `chest_boat_slots`, `chest_slots`,
 or `double_chest_slots`.
@@ -85,8 +128,9 @@ The estimate splits hits as evenly as possible among simultaneous attackers.
 The first volley lands immediately. Each attacker starts with fresh axes and
 is provisioned to replace the hunger lost after each complete group of hits;
 partial groups incur no charge. Axes and loaves round up **per attacker**.
-Loaves from a bale can be distributed across the group. The estimate excludes
-travel, crafting, missed hits, eating time, and existing equipment or food.
+Loaves from a bale can be distributed across the group. Combat time excludes
+travel and cargo handling, which are shown separately when requested. Neither
+estimate includes crafting, missed hits, eating time, or existing equipment or food.
 
 Storage is created during normal bot startup on both SQLite and PostgreSQL.
 On PostgreSQL the bot owns two RLS-enabled tables in the private `sunset_war`
