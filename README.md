@@ -20,6 +20,10 @@ administrator can share it, within five minutes. Shared posts omit depot names,
 on-hand balances, shortages and the private sufficiency verdict. Logistics shares
 the calculated space, loads and timing, excluding its inventory manifest.
 Sharing preserves the original estimate even if rules or stock change afterwards.
+The Share button publishes a public interaction response. If Discord rejects it,
+the private error includes its error code and permission guidance, and the button
+can be retried. Unconfirmed network failures stay locked to prevent duplicate
+posts; check the channel before creating another estimate.
 
 For `stock-set`, `stock-add` and `stock-subtract`, enter hay, diamonds, iron, arrows or logs in
 whichever units you counted. A bare number means individual items. A stack
