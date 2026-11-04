@@ -6,11 +6,12 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 import discord
 from discord import app_commands
+from discord.webhook.async_ import async_context
 
 import database
 import war_store as stock
@@ -207,7 +208,8 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         self.guild = 1001
         self.admin = SimpleNamespace(guild_id=self.guild, permissions=discord.Permissions(administrator=True),
                                      response=AsyncMock(), followup=AsyncMock(), user=SimpleNamespace(id=42),
-                                     channel_id=123, channel=AsyncMock(), message=AsyncMock())
+                                     channel_id=123, channel=AsyncMock(), message=AsyncMock(), edit_original_response=AsyncMock())
+        self.admin.response.is_done = Mock(return_value=False)
 
     async def test_atomic_depot_changes(self):
         await check_atomic_depot_changes(self, self.guild)
@@ -287,11 +289,17 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("32m 59.5s", view.text)
         await stock.configure(self.guild, {"damage_per_hit": 2})
         await asyncio.gather(view.share.callback(self.admin), view.share.callback(self.admin))
-        self.admin.channel.send.assert_awaited_once()
-        sent = self.admin.channel.send.await_args
+        public_posts = [call for call in self.admin.response.send_message.await_args_list
+                        if call.kwargs.get("ephemeral") is False]
+        self.assertEqual(len(public_posts), 1)
+        sent = public_posts[0]
         self.assertEqual(response_text(sent), view.text)
         self.assertEqual(sent.kwargs["allowed_mentions"].to_dict(), discord.AllowedMentions.none().to_dict())
         self.assertTrue(view.share.disabled)
+        self.admin.channel.send.assert_not_awaited()
+        self.admin.response.defer.assert_not_awaited()
+        self.admin.message.edit.assert_not_awaited()
+        self.admin.edit_original_response.assert_awaited_once_with(view=view)
 
     async def test_share_rechecks_requester_admin_guild_and_channel(self):
         for changed in ({"user": SimpleNamespace(id=43)}, {"permissions": discord.Permissions()},
@@ -303,13 +311,83 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
                 visitor.channel.send.assert_not_awaited()
                 self.assertFalse(view.attempted)
 
-    async def test_share_failed_send_does_not_post_again(self):
+    async def test_share_uses_real_discord_public_callback_serialization(self):
+        for text in ("public estimate", "Long estimate\n" * 200):
+            with self.subTest(length=len(text)):
+                view = ShareEstimate(self.admin, text)
+                click = SimpleNamespace(**vars(self.admin), id=456, token="test-token", _session=None,
+                                        _state=SimpleNamespace(allowed_mentions=None,
+                                                               http=SimpleNamespace(proxy=None, proxy_auth=None)))
+                click.response = discord.InteractionResponse(click)
+                adapter = SimpleNamespace(create_interaction_response=AsyncMock(return_value={
+                    "interaction": {"id": "456", "response_message_ephemeral": False}}))
+                context_token = async_context.set(adapter)
+                try:
+                    await view.share.callback(click)
+                finally:
+                    async_context.reset(context_token)
+                payload = adapter.create_interaction_response.await_args.kwargs["params"].payload
+                self.assertEqual(payload["type"], 4)  # A new response, not an edit to the private estimate.
+                data = payload["data"]
+                self.assertEqual(data.get("content") or data["embeds"][0]["description"], text)
+                self.assertFalse(data.get("flags", 0) & 64)
+                self.assertEqual(data["allowed_mentions"]["parse"], [])
+                self.admin.channel.send.assert_not_awaited()
+
+    async def test_share_permission_rejection_reports_code_and_allows_new_click(self):
         view = ShareEstimate(self.admin, "estimate")
-        self.admin.channel.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "denied")
+        self.admin.response.send_message.side_effect = [discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), {"code": 50013, "message": "Missing Permissions"}), None]
+        with self.assertLogs("claims-bot.war-share", "WARNING") as recorded:
+            await view.share.callback(self.admin)
+        notice = response_text(self.admin.response.send_message.await_args)
+        self.assertIn("Discord 50013", notice)
+        self.assertIn("Embed Links", notice)
+        self.assertTrue(self.admin.response.send_message.await_args.kwargs["ephemeral"])
+        self.assertIn("discord_code=50013", recorded.output[0])
+        self.assertFalse(view.attempted)
+        self.assertFalse(view.share.disabled)
+        self.admin.response.send_message.side_effect = None
         await view.share.callback(self.admin)
-        self.assertIn("Could not confirm sharing", response_text(self.admin.followup.send.await_args))
-        await view.share.callback(self.admin)
-        self.admin.channel.send.assert_awaited_once()
+        self.assertTrue(view.shared)
+        self.assertFalse(self.admin.response.send_message.await_args.kwargs["ephemeral"])
+
+    async def test_share_ambiguous_failures_do_not_post_again(self):
+        for error in (discord.HTTPException(SimpleNamespace(status=503, reason="Unavailable"), "unavailable"),
+                      discord.HTTPException(SimpleNamespace(status=408, reason="Request Timeout"), "timeout"),
+                      TimeoutError(), discord.HTTPException(SimpleNamespace(status=400, reason="Bad Request"),
+                                                           {"code": 40060, "message": "Already acknowledged"})):
+            with self.subTest(error=type(error).__name__):
+                view = ShareEstimate(self.admin, "estimate")
+                self.admin.response.send_message.reset_mock()
+                self.admin.response.send_message.side_effect = [error, None, None]
+                with self.assertLogs("claims-bot.war-share", "WARNING"):
+                    await view.share.callback(self.admin)
+                self.assertIn("did not confirm", response_text(self.admin.response.send_message.await_args))
+                await view.share.callback(self.admin)
+                public_attempts = [call for call in self.admin.response.send_message.await_args_list
+                                   if call.kwargs.get("ephemeral") is False]
+                self.assertEqual(len(public_attempts), 1)
+                self.assertTrue(view.share.disabled)
+
+    async def test_expired_click_uses_original_command_to_report_failure(self):
+        view = ShareEstimate(self.admin, "estimate")
+        self.admin.response.send_message.side_effect = discord.NotFound(
+            SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Unknown interaction"})
+        with self.assertLogs("claims-bot.war-share", "WARNING"):
+            await view.share.callback(self.admin)
+        self.assertIn("click expired", response_text(self.admin.followup.send.await_args))
+        self.assertTrue(self.admin.followup.send.await_args.kwargs["ephemeral"])
+        self.assertFalse(view.attempted)
+
+    async def test_successful_share_stays_successful_when_button_edit_fails(self):
+        view = ShareEstimate(self.admin, "estimate")
+        self.admin.edit_original_response.side_effect = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "expired")
+        with self.assertLogs("claims-bot.war-share", "WARNING"):
+            await view.share.callback(self.admin)
+        self.assertTrue(view.shared)
+        self.assertTrue(view.share.disabled)
+        self.admin.response.send_message.assert_awaited_once()
 
     async def test_large_estimate_fits_discord_and_shares_only_public_calculation(self):
         await stock.configure(self.guild, {
