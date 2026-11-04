@@ -78,7 +78,7 @@ async def remove_stock(guild, location):
                            (guild, clean_location(location).casefold()))
 
 
-async def stock_page(guild, page, size=6):
+async def stock_page(guild, page, size=3):
     async with db.DBConnection() as conn:
         return await conn.fetchall(
             f"SELECT location, {_COLUMNS} FROM {_prefix()}war_stock WHERE guild_id=? "

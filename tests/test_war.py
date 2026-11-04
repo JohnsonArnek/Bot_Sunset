@@ -17,7 +17,7 @@ import war_store as stock
 from cogs.war import WarCog
 from cogs.war_share import ShareEstimate, message_payload
 from war_display import duration, quantity
-from war_planner import MAX_DEPOT_ITEMS, Packing, WarRules, defence_transfer, delivery_time, estimate, pack, stock_quantity
+from war_planner import MAX_DEPOT_ITEMS, Packing, WarRules, block_shipment, defence_transfer, delivery_time, estimate, pack, plan_transport, stock_quantity
 
 
 def response_text(call):
@@ -53,9 +53,39 @@ class Estimates(unittest.TestCase):
         for seconds, expected in [(0, "0s"), (60, "1m"), (3600, "1h"), (86400, "1d"),
                                   (Decimal("90061.25"), "1d 1h 1m 1.25s")]:
             self.assertEqual(duration(seconds), expected)
-        self.assertEqual(quantity(5251, "hay", WarRules()), "5,251 hay (1 double chest + 1 single chest + 1 stack + 3 loose)")
-        self.assertEqual(quantity(65, "diamonds", WarRules()), "65 diamonds (1 stack + 1 loose); 7 blocks + 2 loose")
-        self.assertEqual(quantity(18, "iron", WarRules()), "18 iron ingots; 2 blocks")
+        self.assertEqual(quantity(5251, "hay", WarRules()), "1 double chest + 1 single chest + 1 stack + 3 loose hay (5,251 hay)")
+        self.assertEqual(quantity(65, "diamonds", WarRules()), "7 blocks + 2 loose diamonds (65 diamonds)")
+        self.assertEqual(quantity(18, "iron", WarRules()), "2 blocks (18 iron ingots)")
+        self.assertEqual(quantity(12000, "hay", WarRules()), "3 double chests + 25 stacks + 32 loose hay (12,000 hay)")
+        self.assertEqual(quantity((54 * 64 + 27 * 64 + 64 + 3) * 9 + 2, "diamonds", WarRules()),
+                         "1 double chest of blocks + 1 single chest of blocks + 1 stack of blocks + 3 blocks + 2 loose diamonds (47,261 diamonds)")
+
+    def test_transport_trips_follow_mode_capacity_and_fleet(self):
+        rules = WarRules()
+        for slots, donkey, boat, carts in [(0, 0, 0, 0), (15, 1, 1, 1), (16, 2, 1, 1),
+                                           (27, 2, 1, 1), (28, 2, 2, 2), (55, 4, 3, 3)]:
+            with self.subTest(slots=slots):
+                cargo = pack(rules, hay=slots * 64)
+                self.assertEqual(plan_transport(cargo, rules, "donkey").trips, donkey)
+                self.assertEqual(plan_transport(cargo, rules, "chest_boat").trips, boat)
+                rail = plan_transport(cargo, rules, "chest_minecart")
+                self.assertEqual((rail.carriers, rail.trips), (carts, int(slots > 0)))
+        cargo = pack(rules, hay=55 * 64)
+        self.assertEqual(plan_transport(cargo, rules, "donkey", 2).trips, 2)
+        self.assertEqual(plan_transport(cargo, rules, "chest_boat", 3).trips, 1)
+        custom = WarRules(chest_minecart_slots=10)
+        self.assertEqual(plan_transport(cargo, custom, "chest_minecart").carriers, 6)
+        with self.assertRaises(ValueError):
+            plan_transport(cargo, rules, "chest_minecart", 2)
+
+    def test_compact_packing_and_whole_block_shipments(self):
+        rules = WarRules()
+        self.assertEqual(pack(rules, diamonds=576).slots, 1)
+        self.assertEqual(pack(rules, diamonds=577).slots, 2)  # one stack of blocks + one loose diamond
+        self.assertEqual(pack(rules, diamonds=576, iron=576, hay=64, logs=64).slots, 4)
+        self.assertEqual(pack(rules, diamonds=8, iron=8).slots, 2)
+        for needed, shipped in [(0, 0), (1, 9), (9, 9), (10, 18), (30, 36)]:
+            self.assertEqual(block_shipment(needed), shipped)
 
     def test_delivery_counts_only_intermediate_return_legs(self):
         route = delivery_time(WarRules(), 12, 2)
@@ -102,9 +132,9 @@ class Estimates(unittest.TestCase):
             with self.subTest(hay=hay, diamonds=diamonds):
                 self.assertEqual(pack(rules, hay=hay, diamonds=diamonds), expected)
 
-    def test_crafted_axes_take_individual_slots_and_capacities_are_independent(self):
+    def test_compacted_metal_and_container_capacities_are_independent(self):
         rules = WarRules(stack_size=16, donkey_slots=6, chest_boat_slots=8, chest_slots=10, double_chest_slots=12)
-        self.assertEqual(pack(rules, axes=15, bread=17), Packing(17, 3, 3, 2, 2))
+        self.assertEqual(pack(rules, diamonds=144 * 15, hay=17), Packing(17, 3, 3, 2, 2))
         with self.assertRaises(ValueError):
             WarRules(stack_size=65)
 
@@ -182,12 +212,53 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_depot_changes(self):
         await check_atomic_depot_changes(self, self.guild)
 
+    async def test_stock_ledger_uses_container_units_for_each_depot_and_totals(self):
+        await stock.set_stock(self.guild, "Keep", hay=12000, diamonds=31104, iron=15552, logs=65)
+        await stock.set_stock(self.guild, "Outpost", hay=64, diamonds=576)
+        await stock.set_stock(self.guild + 1, "Hidden", hay=100000)
+        await self.cog.stock_list.callback(self.cog, self.admin, location="Keep")
+        scoped = response_text(self.admin.followup.send.await_args)
+        self.assertIn("Hay: 3 double chests + 25 stacks + 32 loose hay (12,000 hay)", scoped)
+        self.assertIn("Diamonds: 1 double chest of blocks (31,104 diamonds)", scoped)
+        self.assertIn("Iron: 1 single chest of blocks (15,552 iron ingots)", scoped)
+        self.assertNotIn("Outpost", scoped)
+        await self.cog.stock_list.callback(self.cog, self.admin)
+        total = response_text(self.admin.followup.send.await_args)
+        self.assertIn("1 double chest of blocks + 1 stack of blocks (31,680 diamonds)", total)
+        self.assertIn("Outpost", total)
+        self.assertNotIn("Hidden", total)
+        self.assertEqual((await stock.available(self.guild, "Keep"))["diamonds"], 31104)
+        # A full page of maximum balances and long escaped location names must fit Discord.
+        for n in range(4):
+            await stock.set_stock(self.guild, str(n) + "*" * 63, **{k: MAX_DEPOT_ITEMS for k in stock.RESOURCES})
+        await self.cog.stock_list.callback(self.cog, self.admin)
+        self.assertLessEqual(len(response_text(self.admin.followup.send.await_args)), 4096)
+
+    async def test_whole_block_shipment_checks_surplus_and_rail_delivers_once(self):
+        await stock.set_stock(self.guild, "Keep", hay=7, diamonds=30, logs=3)
+        await self.cog.conquerable.callback(self.cog, self.admin, 2400, 5, location="Keep")
+        text = response_text(self.admin.followup.send.await_args)
+        self.assertIn("4 blocks (36 diamonds)", text)
+        self.assertIn("6 spare diamonds", text)
+        self.assertIn("Insufficient supplies", text)
+        self.assertIn("Short: 6 diamonds", text)
+        self.assertNotIn("Crafted axes and required loaves", text)
+        self.assertEqual((await stock.available(self.guild, "Keep"))["diamonds"], 30)
+        await stock.set_stock(self.guild, "Rail", hay=55 * 64)
+        await self.cog.config.callback(self.cog, self.admin, chest_minecart_slots=20)
+        await self.cog.logistics.callback(self.cog, self.admin, "Rail", travel_minutes=12, mode="chest_minecart")
+        text = response_text(self.admin.followup.send.await_args)
+        self.assertIn("3 chest minecarts needed · 1 rail dispatch", text)
+        self.assertIn("Delivery: 32m", text)
+        self.assertIn("no return trips", text)
+        self.assertEqual((await stock.rules_for(self.guild + 1)).chest_minecart_slots, 27)
+
     async def test_diamond_and_log_commands_and_log_shortage(self):
         await self.cog.stock_set.callback(self.cog, self.admin, "Hidden Depot", hay="7", diamonds="4 blocks", logs="2")
         await self.cog.conquerable.callback(self.cog, self.admin, 2400, 5, location="Hidden Depot")
         before = response_text(self.admin.followup.send.await_args)
         self.assertIn("Insufficient supplies", before)
-        self.assertIn("Logs: need **3** · have **2** · short 1", before)
+        self.assertIn("Logs available: 2 logs · Short: 1 logs", before)
         await self.cog.stock_add.callback(self.cog, self.admin, "Hidden Depot", logs="1 stack", diamonds="1 stack of blocks")
         await self.cog.stock_subtract.callback(self.cog, self.admin, "Hidden Depot", logs="63", diamonds="64 blocks")
         await self.cog.conquerable.callback(self.cog, self.admin, 2400, 5, location="Hidden Depot")
@@ -211,7 +282,7 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(view, ShareEstimate)
         for secret in ("Secret Depot", "887", "991", "777", "Enough supplies", "Private stock check"):
             self.assertNotIn(secret, view.text)
-        self.assertIn("30 diamonds", view.text)
+        self.assertIn("4 blocks (36 diamonds)", view.text)
         self.assertIn("3 logs", view.text)
         self.assertIn("32m 59.5s", view.text)
         await stock.configure(self.guild, {"damage_per_hit": 2})
@@ -248,7 +319,7 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
             "planks_per_batch": 1_000_000, "sticks_per_batch": 1, "planks_per_log": 1,
             "stack_size": 1, "loading_minutes": 1_000_000, "unloading_minutes": 1_000_000,
         })
-        for command, args, kwargs in [(self.cog.conquerable, (2_000_000_000, 1), {"travel_minutes": 1_000_000, "trips": 1_000_000}),
+        for command, args, kwargs in [(self.cog.conquerable, (2_000_000_000, 1), {"travel_minutes": 1_000_000, "mode": "donkey"}),
                                       (self.cog.logistics, (), {}), (self.cog.defence, (), {"points": 2**53 - 1})]:
             await command.callback(self.cog, self.admin, *args, **kwargs)
             call = self.admin.followup.send.await_args
@@ -270,8 +341,11 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Depot to conquest", await run(self.cog.conquerable, 2400, 5))
         await run(self.cog.config, loading_minutes=0, unloading_minutes=1.25)
         self.assertIn("Delivery: 1m 15s", await run(self.cog.logistics, "Depot", travel_minutes=0))
-        self.assertIn("Delivery: 8m 30s", await run(self.cog.logistics, "Depot", travel_minutes=2, trips=2))
-        self.assertIn("Enter travel_minutes", await run(self.cog.logistics, "Depot", trips=2))
+        await stock.set_stock(self.guild, "Convoy", hay=960, diamonds=9)  # 16 slots: two donkey trips
+        self.assertIn("Delivery: 8m 30s", await run(self.cog.logistics, "Convoy", travel_minutes=2))
+        self.assertIn("2 outbound trips", await run(self.cog.logistics, "Convoy"))
+        self.assertIn("Delivery: 3m 15s", await run(self.cog.logistics, "Convoy", travel_minutes=2, mode="chest_boat"))
+        self.assertIn("Delivery: 3m 15s", await run(self.cog.logistics, "Convoy", travel_minutes=2, carriers=2))
         self.assertEqual((await stock.rules_for(self.guild + 1)).loading_minutes, 10)
         await stock.set_stock(self.guild, "Empty", arrows=100)
         self.assertIn("No cargo to deliver", await run(self.cog.logistics, "Empty", travel_minutes=12))
@@ -322,7 +396,8 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         await self.cog.stock_set.callback(self.cog, self.admin, "Base", "2 stacks + 1", "1 chest")
         await self.cog.stock_add.callback(self.cog, self.admin, "BASE", diamonds="1 stack")
         await self.cog.stock_subtract.callback(self.cog, self.admin, "base", hay="1 stack")
-        self.assertIn("17 hay · 160 diamonds", response_text(self.admin.followup.send.await_args))
+        self.assertIn("1 stack + 1 loose hay (17 hay)", response_text(self.admin.followup.send.await_args))
+        self.assertIn("1 stack of blocks + 1 block + 7 loose diamonds (160 diamonds)", response_text(self.admin.followup.send.await_args))
         self.assertTrue(self.admin.followup.send.await_args.kwargs["ephemeral"])
         for hay, diamonds in [("18", "10"), ("1", "0.5 stacks"), (None, None)]:
             await self.cog.stock_subtract.callback(self.cog, self.admin, "Base", hay, diamonds)
@@ -349,18 +424,18 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_conquest_uses_only_requested_supply_and_never_spends_it(self):
         await stock.set_stock(self.guild, "North Keep", 7, 29, logs=3)
-        await stock.set_stock(self.guild, "Quarry", 0, 1)
+        await stock.set_stock(self.guild, "Quarry", 0, 7)
         await stock.set_stock(self.guild+1, "North Keep", 99, 99)
         cmd = self.cog.conquerable
         self.assertTrue(await cmd._check_can_run(self.admin))
         self.admin.response.defer.assert_awaited_once_with(ephemeral=True)
-        for location, expected in [(" NORTH  KEEP ", "short 1"), (None, "Enough supplies"),
+        for location, expected in [(" NORTH  KEEP ", "Short: 7 diamonds"), (None, "Enough supplies"),
                                     ("absent", "No such reserve location")]:
             await cmd.callback(self.cog, self.admin, 2400, 5, location)
             response = self.admin.followup.send.await_args
             self.assertIn(expected, response_text(response))
             self.assertTrue(response.kwargs["ephemeral"])
-        self.assertEqual(await stock.available(self.guild), dict(hay=7, diamonds=30, iron=0, arrows=0, logs=3))
+        self.assertEqual(await stock.available(self.guild), dict(hay=7, diamonds=36, iron=0, arrows=0, logs=3))
         await stock.set_stock(self.guild, "north keep", 0, 0)
         self.assertEqual(len(await stock.stock_page(self.guild, 1)), 2)
         await stock.remove_stock(self.guild, "North Keep")
@@ -381,7 +456,7 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         await stock.set_stock(self.guild, "Mine", 1, 30)
         await stock.set_stock(self.guild+1, "Mine", 99999, 99999)
         cmd = self.cog.logistics
-        for location, expected in [("Keep", "15 slots · 1 donkey load"), (None, "17 slots · 2 donkey loads"),
+        for location, expected in [("Keep", "15 slots · 1 donkey"), (None, "18 slots · 1 donkey"),
                                    ("Missing", "No such reserve location")]:
             await cmd.callback(self.cog, self.admin, location)
             response = self.admin.followup.send.await_args
@@ -389,12 +464,13 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(response.kwargs["ephemeral"])
         await stock.configure(self.guild, {"donkey_slots": 2, "chest_slots": 8})
         await cmd.callback(self.cog, self.admin, "Keep")
-        self.assertIn("8 donkey loads", response_text(self.admin.followup.send.await_args))
+        self.assertIn("8 carrier loads", response_text(self.admin.followup.send.await_args))
         self.assertIn("2 single chests", response_text(self.admin.followup.send.await_args))
         await self.cog.conquerable.callback(self.cog, self.admin, 2400, 5)
         manifest = response_text(self.admin.followup.send.await_args)
-        self.assertIn("Raw hay, diamonds and logs: 3 slots · 2 donkey loads", manifest)
-        self.assertIn("Crafted axes and required loaves: 11 slots · 6 donkey loads", manifest)
+        self.assertIn("3 slots · 1 donkey (2 slots each) · 2 carrier loads", manifest)
+        self.assertNotIn("Crafted axes and required loaves", manifest)
+        self.assertIn("4 blocks (36 diamonds)", manifest)
 
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "needs a disposable PostgreSQL database")
@@ -411,8 +487,8 @@ class WarPostgres(unittest.IsolatedAsyncioTestCase):
         await stock.set_stock(guild, "Main", 5, 3)
         await stock.set_stock(guild, "main", 7, 9)
         self.assertEqual(await stock.available(guild), dict(hay=7, diamonds=9, iron=0, arrows=0, logs=0))
-        rules = await stock.configure(guild, {"axe_durability": 120, "rehit_seconds": "0.75"})
-        self.assertEqual((rules.axe_durability, rules.rehit_seconds), (120, Decimal("0.75")))
+        rules = await stock.configure(guild, {"axe_durability": 120, "rehit_seconds": "0.75", "chest_minecart_slots": 40})
+        self.assertEqual((rules.axe_durability, rules.rehit_seconds, rules.chest_minecart_slots), (120, Decimal("0.75"), 40))
         async with database.DBConnection() as conn:
             row = await conn.fetchone("""
                 SELECT bool_and(c.relrowsecurity) AS rls, count(*) AS tables,

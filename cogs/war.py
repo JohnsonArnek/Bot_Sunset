@@ -1,6 +1,7 @@
 """Administrator-only strategic reserves and settlement assault planning."""
 
 from decimal import Decimal
+from typing import Literal
 
 import discord
 from discord import app_commands
@@ -8,8 +9,8 @@ from discord.ext import commands
 
 import war_store as stock
 from cogs.war_share import ShareEstimate, message_payload
-from war_display import assumptions, duration, quantity
-from war_planner import IRON_PER_BLOCK, defence_transfer, delivery_time, estimate, pack, stock_quantity
+from war_display import assumptions, duration, inventory, quantity
+from war_planner import IRON_PER_BLOCK, block_shipment, defence_transfer, delivery_time, estimate, pack, plan_transport, stock_quantity
 
 
 Quantity = app_commands.Range[str, 1, 100]
@@ -17,6 +18,7 @@ PositiveCount = app_commands.Range[int, 1, 1_000_000]
 Rate = app_commands.Range[float, 0.001, 1_000_000.0]
 Minutes = app_commands.Range[float, 0.0, 1_000_000.0]
 Location = app_commands.Range[str, 1, 64]
+Mode = Literal["donkey", "chest_boat", "chest_minecart"]
 
 
 async def reply(interaction, text, *, share_text=None):
@@ -35,28 +37,38 @@ def label(location):
     return discord.utils.escape_markdown(stock.clean_location(location))
 
 
-def supply(name, needed, held):
+def supply(resource, needed, held, rules):
     balance = held - needed
-    detail = f"{balance:,} left" if balance >= 0 else f"short {-balance:,}"
-    return f"{name}: need **{needed:,}** · have **{held:,}** · {detail}"
+    detail = (f"Left: {quantity(balance, resource, rules)}" if balance >= 0
+              else f"Short: {quantity(-balance, resource, rules)}")
+    return f"{resource.title()} available: {quantity(held, resource, rules)} · {detail}"
 
 
 def units(n, singular, plural):
     return f"{n:,} {singular if n == 1 else plural}"
 
 
-def transport(cargo):
-    return (f"{units(cargo.slots, 'slot', 'slots')} · "
-            f"{units(cargo.donkey_loads, 'donkey load', 'donkey loads')} or "
-            f"{units(cargo.chest_boat_loads, 'chest-boat load', 'chest-boat loads')}")
+def transport(cargo, journey):
+    if journey.mode == "chest_minecart":
+        return (f"{units(cargo.slots, 'slot', 'slots')} · "
+                f"{units(journey.carriers, 'chest minecart', 'chest minecarts')} needed · "
+                f"{units(journey.trips, 'rail dispatch', 'rail dispatches')}. "
+                "Prepared rail route and enough carts assumed; all cargo sent together, no return trips.")
+    single, plural = {"donkey": ("donkey", "donkeys"), "chest_boat": ("chest boat", "chest boats")}[journey.mode]
+    return (f"{units(cargo.slots, 'slot', 'slots')} · {units(journey.carriers, single, plural)} "
+            f"({journey.slots_per_carrier} slots each) · {journey.loads:,} carrier loads · "
+            f"**{units(journey.trips, 'outbound trip', 'outbound trips')}**, "
+            f"{units(max(0, journey.trips - 1), 'return', 'returns')}.")
 
 
 def packing_assumptions(rules):
     return (f"Packing: {rules.stack_size}/stack; slots per donkey {rules.donkey_slots}, "
             f"chest boat {rules.chest_boat_slots}, chest {rules.chest_slots}, "
-            f"double chest {rules.double_chest_slots}. Different items use separate slots; axes use one each.\n"
+            f"double chest {rules.double_chest_slots}, chest minecart {rules.chest_minecart_slots}. "
+            "Diamonds/iron compact into blocks; loose remainders use separate slots.\n"
             f"Each trip: {duration(rules.loading_minutes * 60)} loading + "
-            f"{duration(rules.unloading_minutes * 60)} unloading; intermediate trips return to the depot.")
+            f"{duration(rules.unloading_minutes * 60)} unloading for the whole convoy. "
+            "Supplies pooled at departure; crafting time excluded.")
 
 
 def storage(cargo):
@@ -64,26 +76,26 @@ def storage(cargo):
             f"{units(cargo.double_chests, 'double chest', 'double chests')}")
 
 
-def route_summary(rules, travel_minutes, trips, *, has_cargo=True, combat=None):
-    if travel_minutes is None:
-        if trips != 1:
-            raise ValueError("Enter travel_minutes (one way) to time multiple delivery trips.")
-        return "Add travel_minutes for depot-to-objective timing."
-    if not has_cargo:
+def route_summary(rules, travel_minutes, journey, *, combat=None):
+    if journey.trips == 0:
         return "No cargo to deliver: 0m loading, travel or unloading."
+    if travel_minutes is None:
+        return "Add travel_minutes for depot-to-objective timing."
+    trips = journey.trips
     route = delivery_time(rules, travel_minutes, trips)
     lines = [f"**Delivery: {duration(route.seconds)}** · {units(trips, 'outbound trip', 'outbound trips')}, "
              f"{units(trips - 1, 'return', 'returns')} · {duration(Decimal(str(travel_minutes)) * 60)} one way",
              f"Load {duration(route.loading)} + travel {duration(route.travel)} + unload {duration(route.unloading)}."]
     if combat is not None:
-        lines.append(f"**Depot to conquest if supplied: {duration(route.seconds + combat)}** "
+        lines.append(f"**Depot to conquest if supplied: {duration(route.with_combat(combat))}** "
                      f"(delivery + {duration(combat)} combat).")
     return "\n".join(lines)
 
 
 route_options = app_commands.describe(
     travel_minutes="One-way depot-to-objective travel in minutes; omit to skip timing",
-    trips="Number of successive outbound trips; default 1 if all carriers travel together",
+    mode="Transport mode; chest minecarts send all cargo in one rail dispatch",
+    carriers="Donkeys or chest boats travelling together (default 1); omit for minecarts",
 )
 
 
@@ -125,7 +137,8 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
             row = await stock.set_stock(interaction.guild_id, location, **counts)
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        await reply(interaction, f"**{label(row['location'])}** now holds {stock.balances(row)}.")
+        rules = await stock.rules_for(interaction.guild_id)
+        await reply(interaction, f"**{label(row['location'])}** now holds:\n{inventory(row, rules)}")
 
     @app_commands.command(name="stock-add", description="Add a delivery of resources to an existing depot")
     @depot_options
@@ -148,9 +161,10 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
             balance = await stock.adjust_stock(interaction.guild_id, location, **{k: sign * n for k, n in counts.items()})
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        changed = " and ".join(f"{n:,} {'iron ingots' if k == 'iron' else k}" for k, n in counts.items() if n)
+        rules = await stock.rules_for(interaction.guild_id)
+        changed = " and ".join(quantity(n, k, rules) for k, n in counts.items() if n)
         await reply(interaction, f"{'Withdrew' if withdraw else 'Added'} {changed}. "
-                    f"**{label(balance['location'])}** now holds {stock.balances(balance)}.")
+                    f"**{label(balance['location'])}** now holds:\n{inventory(balance, rules)}")
 
     @app_commands.command(name="stock-remove", description="Remove one location and its stock from this server's reserves")
     async def stock_remove(self, interaction: discord.Interaction, location: Location):
@@ -161,13 +175,23 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         await reply(interaction, f"No reserves are recorded at **{label(location)}**.")
 
     @app_commands.command(name="stock-list", description="Show reserve locations and their current balances")
-    async def stock_list(self, interaction: discord.Interaction, page: PositiveCount = 1):
+    @app_commands.describe(location="Show only this depot or settlement; omit to show paginated reserves")
+    async def stock_list(self, interaction: discord.Interaction, page: PositiveCount = 1, location: Location = None):
+        rules = await stock.rules_for(interaction.guild_id)
+        if location is not None:
+            try:
+                row = await stock.available(interaction.guild_id, location)
+            except ValueError as exc:
+                return await reply(interaction, str(exc))
+            if row is None:
+                return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
+            return await reply(interaction, f"**{label(location)}**\n{inventory(row, rules)}")
         rows = await stock.stock_page(interaction.guild_id, page)
         if not rows:
             return await reply(interaction, "No locations on this page. Use /war stock-set to record supplies.")
         totals = await stock.available(interaction.guild_id)
-        lines = [f"**All reserves:** {stock.balances(totals)}", f"Locations · page {page} (6 per page)"]
-        lines.extend(f"**{label(r['location'])}**: {stock.balances(r)}" for r in rows)
+        lines = [f"**All reserves:**\n{inventory(totals, rules)}", f"Locations · page {page} (3 per page)"]
+        lines.extend(f"**{label(r['location'])}**\n{inventory(r, rules)}" for r in rows)
         lines.append("Use /war logistics for transport and chest space, or /war defence for iron transfer capacity.")
         await reply(interaction, "\n".join(lines))
 
@@ -175,7 +199,7 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
     @app_commands.describe(location="Depot to pack; omit to estimate all supplies consolidated in one place")
     @route_options
     async def logistics(self, interaction: discord.Interaction, location: Location = None,
-                        travel_minutes: Minutes = None, trips: PositiveCount = 1):
+                        travel_minutes: Minutes = None, mode: Mode = "donkey", carriers: PositiveCount = 1):
         try:
             held = await stock.available(interaction.guild_id, location)
         except ValueError as exc:
@@ -185,15 +209,16 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         rules = await stock.rules_for(interaction.guild_id)
         cargo = pack(rules, hay=held["hay"], diamonds=held["diamonds"], iron=held["iron"], logs=held["logs"])
         try:
-            route = route_summary(rules, travel_minutes, trips, has_cargo=cargo.slots > 0)
+            journey = plan_transport(cargo, rules, mode, carriers)
+            route = route_summary(rules, travel_minutes, journey)
         except ValueError as exc:
             return await reply(interaction, str(exc))
         scope = label(location) if location is not None else "all depots, if pooled"
         public = (f"**Assumptions**\n{packing_assumptions(rules)}\n"
-                  "Diamonds and iron packed loose; arrows excluded (inventory only). Supplies consolidated.\n"
-                  f"**Packing estimate**\nTransport: {transport(cargo)}.\nStorage: {storage(cargo)}.\n{route}")
-        inventory = "\n".join(quantity(held[k], k, rules) for k in ("hay", "diamonds", "iron", "logs"))
-        await reply(interaction, public + f"\n**Private manifest: {scope}**\n{inventory}", share_text=public)
+                  "Arrows excluded (inventory only).\n"
+                  f"**Packing estimate**\nTransport: {transport(cargo, journey)}\nStorage: {storage(cargo)}.\n{route}")
+        manifest = "\n".join(f"{k.title()}: {quantity(held[k], k, rules)}" for k in ("hay", "diamonds", "iron", "logs"))
+        await reply(interaction, public + f"\n**Private manifest: {scope}**\n{manifest}", share_text=public)
 
     @app_commands.command(description="Estimate transferable defence from iron; optionally check a target amount")
     @app_commands.describe(location="Use this depot; omit to pool all iron on this server",
@@ -233,6 +258,7 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         stack_size="Items per stack for depot input and packing (maximum 64)",
         defence_per_block="Defence transferable per full iron block (9 ingots)",
         donkey_slots="Stacks per donkey load", chest_boat_slots="Stacks per chest-boat load",
+        chest_minecart_slots="Stacks per chest minecart (default 27); minecart count is calculated",
         chest_slots="Slots per single chest", double_chest_slots="Slots per double chest",
         loading_minutes="Minutes to load one convoy at the depot per outbound trip (default 10)",
         unloading_minutes="Minutes to unload one convoy at the objective per outbound trip (default 10)",
@@ -251,7 +277,8 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                      double_chest_slots: PositiveCount = None, defence_per_block: PositiveCount = None,
                      loading_minutes: Minutes = None, unloading_minutes: Minutes = None,
                      sticks_per_axe: PositiveCount = None, sticks_per_batch: PositiveCount = None,
-                     planks_per_batch: PositiveCount = None, planks_per_log: PositiveCount = None):
+                     planks_per_batch: PositiveCount = None, planks_per_log: PositiveCount = None,
+                     chest_minecart_slots: PositiveCount = None):
         options = dict(diamonds_per_axe=diamonds_per_axe, axe_durability=axe_durability,
                        damage_per_hit=damage_per_hit, rehit_seconds=rehit_seconds,
                        bread_per_hay=bread_per_hay, hunger_per_bread=hunger_per_bread,
@@ -260,7 +287,8 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                        chest_slots=chest_slots, double_chest_slots=double_chest_slots, defence_per_block=defence_per_block,
                        loading_minutes=loading_minutes, unloading_minutes=unloading_minutes,
                        sticks_per_axe=sticks_per_axe, sticks_per_batch=sticks_per_batch,
-                       planks_per_batch=planks_per_batch, planks_per_log=planks_per_log)
+                       planks_per_batch=planks_per_batch, planks_per_log=planks_per_log,
+                       chest_minecart_slots=chest_minecart_slots)
         try:
             rules = await stock.configure(interaction.guild_id, {k: v for k, v in options.items() if v is not None})
         except ValueError as exc:
@@ -275,7 +303,7 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                     f"Each attacker loses {rules.hunger_loss} hunger every {rules.hits_per_hunger_loss} hits.\n"
                     f"Packing: {rules.stack_size} per stack · slots per donkey: {rules.donkey_slots}, "
                     f"chest boat: {rules.chest_boat_slots}, single chest: {rules.chest_slots}, "
-                    f"double chest: {rules.double_chest_slots}.\n"
+                    f"double chest: {rules.double_chest_slots}, chest minecart: {rules.chest_minecart_slots}.\n"
                     f"Iron: {rules.defence_per_block:,} defence per block ({IRON_PER_BLOCK} ingots).\n"
                     f"Per trip: {duration(rules.loading_minutes * 60)} loading · "
                     f"{duration(rules.unloading_minutes * 60)} unloading.")
@@ -286,7 +314,7 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
     @route_options
     async def conquerable(self, interaction: discord.Interaction, hp: app_commands.Range[int, 1, 2_000_000_000],
                           players: PositiveCount, location: Location = None,
-                          travel_minutes: Minutes = None, trips: PositiveCount = 1):
+                          travel_minutes: Minutes = None, mode: Mode = "donkey", carriers: PositiveCount = 1):
         try:
             held = await stock.available(interaction.guild_id, location)
         except ValueError as exc:
@@ -295,29 +323,30 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
             return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
         rules = await stock.rules_for(interaction.guild_id)
         plan = estimate(hp, players, rules)
+        shipped_diamonds = block_shipment(plan.diamonds)
+        raw = pack(rules, hay=plan.hay, diamonds=shipped_diamonds, logs=plan.logs)
         try:
-            route = route_summary(rules, travel_minutes, trips, combat=plan.seconds)
+            journey = plan_transport(raw, rules, mode, carriers)
+            route = route_summary(rules, travel_minutes, journey, combat=plan.seconds)
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        raw = pack(rules, hay=plan.hay, diamonds=plan.diamonds, logs=plan.logs)
-        gear = pack(rules, axes=plan.axes, bread=plan.bread)
-        enough = all(held[k] >= getattr(plan, k) for k in ("diamonds", "hay", "logs"))
+        enough = (held["diamonds"] >= shipped_diamonds and held["hay"] >= plan.hay and held["logs"] >= plan.logs)
         verdict = "Enough supplies" if enough else "Insufficient supplies"
         scope = label(location) if location is not None else "all reserve locations"
         public = (f"{assumptions(rules)}\n{packing_assumptions(rules)}\n"
                   f"**Conquest estimate: {hp:,} HP · {players:,} players**\n"
                   f"{plan.attackers:,} active attackers · {plan.hits:,} hits across {plan.volleys:,} volleys\n"
                   f"**Time if equipped: {duration(plan.seconds)}** from first hit to last.\n"
-                  f"**Required supplies**\n{quantity(plan.diamonds, 'diamonds', rules)} → {plan.axes:,} axes\n"
+                  "Ship hay, logs and whole diamond blocks; craft at the objective.\n"
+                  f"**Shipment**\nDiamonds: {quantity(shipped_diamonds, 'diamonds', rules)} "
+                  f"({plan.diamonds:,} used for {plan.axes:,} axes; {shipped_diamonds - plan.diamonds} spare diamonds)\n"
                   f"{quantity(plan.logs, 'logs', rules)} ({plan.planks:,} planks consumed; {plan.sticks:,} sticks needed)\n"
                   f"{quantity(plan.hay, 'hay', rules)} → {quantity(plan.bread, 'bread', rules)} needed\n"
-                  f"**Transport and storage** (choose one manifest):\n"
-                  f"Raw hay, diamonds and logs: {transport(raw)}; {storage(raw)}.\n"
-                  f"Crafted axes and required loaves: {transport(gear)}; {storage(gear)}.\n{route}")
+                  f"**Transport and storage**\n{transport(raw, journey)}\nStorage: {storage(raw)}.\n{route}")
         private = (f"\n**Private stock check: {verdict}** · {scope}\n"
-                   f"{supply('Diamonds', plan.diamonds, held['diamonds'])}\n"
-                   f"{supply('Hay', plan.hay, held['hay'])}\n"
-                   f"{supply('Logs', plan.logs, held['logs'])}")
+                   f"{supply('diamonds', shipped_diamonds, held['diamonds'], rules)}\n"
+                   f"{supply('hay', plan.hay, held['hay'], rules)}\n"
+                   f"{supply('logs', plan.logs, held['logs'], rules)}")
         await reply(interaction, public + private, share_text=public)
 
 
