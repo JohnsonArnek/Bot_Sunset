@@ -68,6 +68,7 @@ EXTENSIONS = [
     "cogs.rotation",
     "cogs.ledger",
     "cogs.war",
+    "cogs.acclimations",
 ]
 
 

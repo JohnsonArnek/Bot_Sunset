@@ -1,5 +1,60 @@
 # Sunset bot
 
+## Acclimations and Sunrise honours
+
+Acclimations recognise deeds, with a dated record of the recipient, giver,
+amount and story. Appointments and rewards are separate for each Discord server.
+All commands reply privately and disable mention notifications; members can
+read the shared records using the commands below.
+
+Administrators appoint both ranks with `/acclimation deputize member:@Name rank:hand`
+or `rank:tribune`. These are appointments **inside the bot** and do not grant
+Discord roles or administrator permissions. An administrator who wants to make
+ordinary awards should also appoint themselves as a Hand. Existing Discord role
+names do not automatically grant Acclimation authority.
+
+- **Hands:** may issue any number of awards, including multiple Acclimations for
+  a deed. Each entry accepts 1–1,000,000 points.
+- **Tribunes:** may give exactly **one Acclimation total per UTC day**. Their
+  allowance resets at **00:00 UTC**, with no accumulation of unused days.
+- **Quests:** Hands and administrators issue quests and approve completion.
+  A quest pays its fixed reward once per member, separately from Tribune allowances.
+  Another official must recognise your own deed or approve your own quest completion.
+
+| Purpose | Command |
+| --- | --- |
+| Appoint a Hand or Tribune (administrator only) | `/acclimation deputize member:@Name rank:tribune` |
+| End an appointment (administrator only) | `/acclimation dismiss member:@Name` |
+| List current officials | `/acclimation officials` |
+| Audit appointments and dismissals (administrator only) | `/acclimation appointment-history` |
+| Recognise a deed | `/acclimation award member:@Name amount:3 deed:Repaired the northern road` |
+| Read someone's total and next medal milestone | `/acclimation profile member:@Name` |
+| Read the deeds behind their total | `/acclimation history member:@Name page:1` |
+| View the honours board | `/acclimation honours` |
+| Correct a mistaken award without deleting its story (administrator only) | `/acclimation void award_id:123 reason:Duplicate award` |
+| Issue a quest (Hand or administrator) | `/quest create title:Build the monument details:Build the Coppercross monument reward:5` |
+| Find open quests / read one | `/quest list` and `/quest show quest_id:123` |
+| Approve completion and record the deed (Hand or administrator) | `/quest complete quest_id:123 member:@Name deed:Finished the monument` |
+| Close a quest to further completions (Hand or administrator) | `/quest close quest_id:123` |
+
+Profiles default to yourself. The honours board lists eligibility for the
+**Sunrise Copper Medal**: **Third Class at 10**, **Second Class at 30**, and
+**First Class at 50**. Awards that cross a threshold flag readiness for a
+ceremony. Ceremonies, monuments, items and Discord medal roles remain manual;
+the bot provides the totals, names, dates and deed history. Acclimations are
+honours rather than a spendable balance.
+
+Voiding excludes an award from totals and medal eligibility but preserves its
+original deed, issuer and date alongside the correction. It does not restore a
+Tribune's used daily allowance or reopen that member's quest claim. Dismissing
+and reappointing a Tribune also preserves the day's usage. Closing a quest keeps
+all existing rewards. Rewards and limits are transactional and repeated delivery
+of the same Discord interaction cannot create duplicate awards.
+
+Startup creates the tables on SQLite and PostgreSQL. PostgreSQL uses the private,
+RLS-enabled `sunset_acclimations` schema, the existing database connection, and
+the bot's leader fence. No new environment variables or public API grants are needed.
+
 ## Strategic war reserves (Discord administrators)
 
 Start with `/war stock-set location:North Keep hay:7 diamonds:4 blocks logs:3`. Each supplied
