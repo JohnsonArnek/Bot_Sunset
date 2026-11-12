@@ -82,6 +82,7 @@ class DBConnection:
         self.sqlite_conn = None
         self.pg_conn = None
         self._pg_pool = None  # Remember which pool we acquired from
+        self._in_transaction = False
 
     async def __aenter__(self):
         if IS_POSTGRES:
@@ -106,7 +107,8 @@ class DBConnection:
                 await self.pg_conn.execute(q, *params)
         else:
             await self.sqlite_conn.execute(q, params)
-            await self.sqlite_conn.commit()
+            if not self._in_transaction:
+                await self.sqlite_conn.commit()
 
     async def fetchone(self, query: str, params: tuple = ()) -> dict | None:
         q = _format_query(query)
@@ -133,13 +135,38 @@ class DBConnection:
     async def execute_returning_one(self, query: str, params: tuple = ()) -> dict | None:
         """Run a single-row mutation with RETURNING and commit it on both backends."""
         row = await self.fetchone(query, params)
-        if not IS_POSTGRES:
+        if not IS_POSTGRES and not self._in_transaction:
             await self.sqlite_conn.commit()
         return row
 
     @asynccontextmanager
+    async def transaction(self):
+        """One atomic, leader-fenced unit; no query commits before the unit ends."""
+        if self._in_transaction:
+            raise RuntimeError("Nested application transactions are not supported.")
+        if IS_POSTGRES:
+            async with self._fenced(), self.pg_conn.transaction():
+                self._in_transaction = True
+                try:
+                    yield self
+                finally:
+                    self._in_transaction = False
+        else:
+            await self.sqlite_conn.execute("PRAGMA foreign_keys = ON")
+            await self.sqlite_conn.execute("BEGIN IMMEDIATE")
+            self._in_transaction = True
+            try:
+                yield self
+                await self.sqlite_conn.commit()
+            except BaseException:
+                await self.sqlite_conn.rollback()
+                raise
+            finally:
+                self._in_transaction = False
+
+    @asynccontextmanager
     async def _fenced(self):
-        if leader_lease is None:
+        if self._in_transaction or leader_lease is None:
             yield
         else:
             async with leader_lease.fence(self.pg_conn):
@@ -182,6 +209,7 @@ def war_schema(postgres: bool) -> str:
 
 async def init_db():
     """Create all tables if they don't exist and run schema migrations. Called on startup."""
+    from acclimation_store import schema as acclimation_schema
     if IS_POSTGRES:
         conn = await asyncpg.connect(
             DATABASE_URL, timeout=10, command_timeout=10, statement_cache_size=0,
@@ -296,6 +324,7 @@ async def init_db():
 
             # ── Migrations for existing databases ──
             await conn.execute(war_schema(True))
+            await conn.execute(acclimation_schema(True))
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -420,6 +449,7 @@ async def init_db():
             )
             # Soft migrations
             await db.executescript(war_schema(False))
+            await db.executescript(acclimation_schema(False))
             async with db.execute("PRAGMA table_info(war_stock)") as cursor:
                 existing = {row[1] for row in await cursor.fetchall()}
             for column in ("iron", "arrows", "logs"):

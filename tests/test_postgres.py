@@ -135,6 +135,34 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
             "SELECT reason FROM bot_instance_cooldowns WHERE bot_group=$1", self.group,
         ), "leader_write")
 
+    async def test_application_transaction_holds_fence_and_rolls_back_as_a_unit(self):
+        await self.a.acquire()
+        await self.a.cooldown(1800, "original")
+        with patch.object(database, "IS_POSTGRES", True), \
+                patch.object(database, "_pool", self.pool), \
+                patch.object(database, "_pool_lock", asyncio.Lock()), \
+                patch.object(database, "leader_lease", self.a):
+            async with database.DBConnection() as conn:
+                with self.assertRaises(RuntimeError):
+                    async with conn.transaction():
+                        await conn.execute("UPDATE bot_instance_cooldowns SET reason=? WHERE bot_group=?", ("rolled_back", self.group))
+                        raise RuntimeError("abort")
+            self.assertEqual(await self.pool.fetchval("SELECT reason FROM bot_instance_cooldowns WHERE bot_group=$1", self.group), "original")
+            await self.pool.execute("UPDATE bot_leases SET lease_until=clock_timestamp()+interval '1 second' WHERE bot_group=$1", self.group)
+            async with database.DBConnection() as conn, conn.transaction():
+                await conn.execute("UPDATE bot_instance_cooldowns SET reason=? WHERE bot_group=?", ("first", self.group))
+                await asyncio.sleep(1.1)
+                takeover = asyncio.create_task(self.b.acquire())
+                await asyncio.sleep(0.1)
+                self.assertFalse(takeover.done())
+                await conn.execute("UPDATE bot_instance_cooldowns SET reason=? WHERE bot_group=?", ("committed", self.group))
+            self.assertTrue(await takeover)
+            self.assertEqual(await self.pool.fetchval("SELECT reason FROM bot_instance_cooldowns WHERE bot_group=$1", self.group), "committed")
+            async with database.DBConnection() as conn:
+                with self.assertRaises(LeaseLost):
+                    async with conn.transaction():
+                        self.fail("Stale leader began a transaction")
+
     async def test_supervisor_persists_cooldown_and_releases_after_real_db_shutdown(self):
         bot = Mock()
         bot.is_ready.return_value = False
