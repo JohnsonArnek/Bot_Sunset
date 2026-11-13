@@ -211,6 +211,8 @@ async def init_db():
     """Create all tables if they don't exist and run schema migrations. Called on startup."""
     from acclimation_store import schema as acclimation_schema
     from handbook_store import schema as handbook_schema
+    from bank_store import schema as bank_schema
+    from banner_store import schema as banner_schema
     if IS_POSTGRES:
         conn = await asyncpg.connect(
             DATABASE_URL, timeout=10, command_timeout=10, statement_cache_size=0,
@@ -327,6 +329,8 @@ async def init_db():
             await conn.execute(war_schema(True))
             await conn.execute(acclimation_schema(True))
             await conn.execute(handbook_schema(True))
+            await conn.execute(bank_schema(True))
+            await conn.execute(banner_schema(True))
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -453,6 +457,8 @@ async def init_db():
             await db.executescript(war_schema(False))
             await db.executescript(acclimation_schema(False))
             await db.executescript(handbook_schema(False))
+            await db.executescript(bank_schema(False))
+            await db.executescript(banner_schema(False))
             async with db.execute("PRAGMA table_info(war_stock)") as cursor:
                 existing = {row[1] for row in await cursor.fetchall()}
             for column in ("iron", "arrows", "logs"):
@@ -546,6 +552,17 @@ async def get_land_by_id(land_id: int) -> dict | None:
 async def update_land_chunks(land_id: int, new_chunks: int):
     async with DBConnection() as conn:
         await conn.execute("UPDATE lands SET chunks = ? WHERE id = ?", (new_chunks, land_id))
+
+
+async def add_land_chunks(land_id: int, amount: int):
+    """Apply an allocation to the current count, including after a long-lived offer."""
+    async with DBConnection() as conn:
+        row = await conn.execute_returning_one(
+            "UPDATE lands SET chunks=CASE WHEN chunks+? < 0 THEN 0 ELSE chunks+? END WHERE id=? RETURNING chunks",
+            (amount, amount, land_id))
+        if not row:
+            raise ValueError("The land no longer exists.")
+        return row["chunks"]
 
 
 async def update_land_owner(land_id: int, new_owner_id: int):
@@ -724,14 +741,28 @@ async def get_all_pending_requests(guild_id: int) -> list[dict]:
 
 
 async def update_request_status(request_id: int, status: str):
+    expected = {"approved": "pending", "denied": "pending", "purchased": "approved", "expired": "approved"}
+    if status not in expected:
+        raise ValueError("Unsupported claim status transition")
     async with DBConnection() as conn:
-        await conn.execute("UPDATE claim_requests SET status = ? WHERE id = ?", (status, request_id))
+        row = await conn.execute_returning_one("UPDATE claim_requests SET status=? WHERE id=? AND status=? RETURNING id",
+                                               (status, request_id, expected[status]))
+        return row is not None
+
+
+async def approve_partial_request(request_id: int, chunks: int):
+    """Allocation and approval change together, before checkout can read them."""
+    async with DBConnection() as conn:
+        row = await conn.execute_returning_one(
+            "UPDATE claim_requests SET chunks_requested=?,status='approved' WHERE id=? AND status='pending' RETURNING id",
+            (chunks, request_id))
+        return row is not None
 
 
 async def update_request_chunks(request_id: int, new_chunks: int):
     async with DBConnection() as conn:
         await conn.execute(
-            "UPDATE claim_requests SET chunks_requested = ? WHERE id = ?",
+            "UPDATE claim_requests SET chunks_requested = ? WHERE id = ? AND status='pending'",
             (new_chunks, request_id),
         )
 

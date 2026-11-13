@@ -99,8 +99,7 @@ class ReserveCog(commands.GroupCog, name="reserve"):
                 ephemeral=True,
             )
 
-        new_chunks = land["chunks"] + 1
-        await db.update_land_chunks(land["id"], new_chunks)
+        new_chunks = await db.add_land_chunks(land["id"], 1)
         await db.update_reserve_blocks(interaction.guild_id, reserve["total_blocks"] - 1)
         await db.record_purchase(land["id"], "strategic", 0)
 

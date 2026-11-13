@@ -69,6 +69,8 @@ EXTENSIONS = [
     "cogs.ledger",
     "cogs.war",
     "cogs.acclimations",
+    "cogs.bank",
+    "cogs.banners",
 ]
 
 

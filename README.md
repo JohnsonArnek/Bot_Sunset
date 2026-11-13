@@ -13,6 +13,105 @@ See [Handbook setup and publishing](docs/HANDBOOKS.md) for access rules and the
 operator import tool. The schema is created on startup; new servers need an
 article import. No additional hosting service or environment variable is needed.
 
+## Central bank
+
+Each server has personal accounts, settlement accounts and a central treasury in
+whole emeralds (`ems`). Accounts start at zero and are available on first use;
+no member-registration sweep or new Discord roles are required. `/bank accounts`
+also opens accounts for all registered lands. Existing purchases are not charged
+retroactively and no opening funds are invented.
+
+| Command | Access and effect |
+| --- | --- |
+| `/bank balance` | Read your personal balance |
+| `/bank balance land_name:Coppercross` | Owners/officers read their settlement; administrators may read any |
+| `/bank statement` | Read dated entries, authorising user, reasons and running balances; same account selectors as balance |
+| `/bank deposit amount:100 reason:Received emeralds land_name:Coppercross` | Administrator credits a verified deposit |
+| `/bank withdraw amount:20 reason:Approved withdrawal member:@Name` | Administrator debits an approved withdrawal; insufficient funds are rejected |
+| `/bank accounts page:1` | Administrator directory of settlement, opened personal and treasury accounts |
+| `/bank treasury` | Administrator treasury balance and statement |
+
+Use one account selector at a time: `member`, `land_name`, or administrator-only
+`account_id`. Deposits and withdrawals require an explicit target and reason.
+Discord Administrator permission is required; the configured staff role, Hands,
+Tribunes and land officers cannot adjust balances. All bank replies are private.
+Deposits/withdrawals record an administrator's decision and do not move Minecraft
+items. The application preserves journal entries; correct mistakes with a new
+authorised adjustment explaining the original transaction.
+
+`/claim buy payment:bank` immediately transfers the complete purchase price from
+the settlement account to the central treasury. Only the current land owner can
+purchase. Existing approval, weekday and weekly-limit checks still apply. The
+price is the approved quantity multiplied by the per-block tier price at checkout
+(not progressive pricing across the batch). The private receipt shows the amount
+and settlement balance after payment. A free purchase needs no funds.
+
+Omit `payment`, or choose `manual`, to retain the manual-payment workflow with no
+bank debit. Reserve, leftover, rotation and auction purchases remain manual.
+Personal funds are never used automatically for land purchases. A shortage or
+database error leaves balances, approvals, purchases, chunks and the delivery
+ledger unchanged. Retries of the same interaction return its original receipt.
+Delivery still needs to be confirmed separately after the items arrive.
+
+Land accounts follow the stable land ID across ownership changes. Deleting a land
+or using `/sunset nuke` does not delete its bank history or money; administrators
+can inspect and reconcile the archived account using `account_id`. Reusing the
+same land name creates a separate zero-balance account. Personal accounts also
+remain recorded after a member leaves.
+
+Storage is created on startup in the private, RLS-enabled `sunset_bank` schema
+(SQLite is supported locally). Balances are sums of journal entries. Short
+leader-fenced transactions serialize bank/claim writes per server; a bank payment,
+treasury credit, purchase, chunk allocation and delivery obligation commit together.
+Administrator adjustments accept 1–1,000,000,000 ems per entry; balances are capped
+at 1,000,000,000,000 ems, and claim receipts at 2,000,000,000 ems. No new environment
+variables are needed.
+
+## Claim banner creation
+
+Every new normal `/claim buy` records a creation liability for each approved
+block, separately from its purchase payment and delivery. The default cost is
+**37 ems per banner**. The land's share is its checkout price capped at the
+creation cost; the central budget owes the remainder. At a 7-ems claim price,
+one banner creates a 7-ems land liability and a 30-ems central subsidy. A land
+shortage never increases that subsidy. Above-cost sale proceeds remain in the
+treasury after creation (a 50-ems bank purchase leaves 13 after a 37-ems creation).
+
+| Command | Purpose |
+| --- | --- |
+| `/banner status land_name:Coppercross` | Owner/officers read the land's creation backlog and liabilities |
+| `/banner status` | Administrator sees all tracked purchases and total liabilities |
+| `/banner show purchase_id:123` | Fixed cost split and recent creation records for a purchase receipt |
+| `/banner create purchase_id:123 blocks:1 reason:Crafted` | Administrator records actual creation and debits bank funds |
+| `/banner create purchase_id:123 blocks:1 reason:Cash received and spent land_payment:physical` | Administrator confirms physical payment of the unpaid land share; treasury funds only its fixed subsidy |
+| `/banner cost amount:37` | Administrator changes the cost for future purchases; omit amount to read it |
+
+All banner replies are private. The creation step accepts partial batches,
+rejects quantities already created, and records who acted, when and why. It
+destroys the recorded cost rather than transferring it to another bank account.
+For manual claims, the default creation step debits the land share from its bank
+account and the subsidy from the treasury. Physical-payment confirmation is an
+explicit administrator assertion that the land contribution was received and
+spent outside the bank; it creates no extra credit. Never also deposit those same
+spent emeralds as new bank funds.
+
+Bank-paid claims have already transferred the land contribution into the
+treasury. Creation spends that contribution there, together with the subsidy,
+without charging the land twice. Both required balances are checked before any
+debit or creation record commits. A shortage leaves the entire batch unchanged;
+an administrator can fund the appropriate account or record fewer banners.
+
+`/bank balance` and `/bank treasury` show pending creation liabilities and bank
+funding needed. These are obligations, not reserved funds. Costs and subsidy
+splits are frozen at checkout; later config, ownership or tier changes do not
+rewrite them. Creation records and obligations survive land deletion.
+
+Creation is an administrator action. `/ledger deliver` still only records
+delivery and cannot spend money or clear creation liabilities. The tracker covers
+new normal purchases after deployment; it does not infer historical creation or
+backfill reserve, leftover, auction, rotation or manual ledger allocations.
+Private tables use the RLS-enabled `sunset_banners` schema alongside the bank.
+
 ## Acclimations and Sunrise honours
 
 Acclimations recognise deeds, with a dated record of the recipient, giver,

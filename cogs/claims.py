@@ -6,10 +6,10 @@ All commands are scoped per Discord server (guild).
 import discord
 from discord import app_commands
 from discord.ext import commands
-from datetime import datetime, timezone
 
 import database as db
 import models
+import bank_store
 
 
 async def _is_staff(interaction: discord.Interaction) -> bool:
@@ -106,198 +106,52 @@ class ClaimsCog(commands.GroupCog, name="claim"):
 
         await interaction.followup.send(embed=embed)
 
-    # ── /claim buy ────────────────────────────────────────────────────
+    async def _checkout(self, interaction, *, kind="normal", payment="manual"):
+        private = payment == "bank"
+        await interaction.response.defer(ephemeral=private)
+        try:
+            receipt = await bank_store.buy_claim(interaction.guild_id, interaction.user.id,
+                                                request_id=interaction.id, payment=payment, kind=kind)
+        except ValueError as exc:
+            return await interaction.followup.send(str(exc), ephemeral=True,
+                                                   allowed_mentions=discord.AllowedMentions.none())
+        embed = discord.Embed(title="Purchase already recorded" if receipt["duplicate"] else "Claim purchase recorded",
+                              colour=discord.Colour.gold())
+        embed.add_field(name="Land", value=discord.utils.escape_markdown(receipt["land_name"])[:240], inline=True)
+        embed.add_field(name="Blocks", value=str(receipt["blocks"]), inline=True)
+        embed.add_field(name="Total chunks after purchase", value=str(receipt["chunks"]), inline=True)
+        embed.add_field(name="Price", value=f"{receipt['blocks']:,} × {receipt['unit_price']:,} = **{receipt['total']:,} ems**", inline=False)
+        embed.add_field(name="Payment", value="Bank transfer to central treasury" if private else "Manual payment (no bank debit)", inline=False)
+        if private:
+            embed.add_field(name="Settlement balance after payment", value=f"{receipt['balance']:,} ems", inline=False)
+        if receipt.get("banner"):
+            b = receipt["banner"]
+            quantity = receipt["blocks"]
+            embed.add_field(name="Banner creation owed", value=(
+                f"{quantity:,} × {b['unit_cost']:,} = **{quantity*b['unit_cost']:,} ems** to be destroyed at creation.\n"
+                f"Land share: {quantity*b['land_unit']:,} · central subsidy: {quantity*(b['unit_cost']-b['land_unit']):,} ems.\n"
+                f"Land contribution prepaid by bank: {quantity*b['prepaid_unit']:,} ems.\n"
+                f"Track with /banner show purchase_id:{receipt['operation_id']}"), inline=False)
+        embed.set_footer(text=f"Receipt #{receipt['operation_id']} · Delivery is recorded separately in the block ledger")
+        await interaction.followup.send(embed=embed, ephemeral=private, allowed_mentions=discord.AllowedMentions.none())
 
-    @app_commands.command(name="buy", description="Buy your land's weekly normal claim block")
+    @app_commands.command(name="buy", description="Buy your land's weekly claim blocks using manual payment or its bank account")
     @app_commands.guild_only()
-    async def claim_buy(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+    @app_commands.describe(payment="Bank transfer pays immediately from the settlement account when funds are sufficient")
+    @app_commands.choices(payment=[app_commands.Choice(name="Manual payment", value="manual"),
+                                  app_commands.Choice(name="Bank transfer", value="bank")])
+    async def claim_buy(self, interaction: discord.Interaction, payment: str = "manual"):
+        await self._checkout(interaction, payment=payment)
 
-        land = await db.get_land_for_user(interaction.guild_id, interaction.user.id)
-        if not land:
-            return await interaction.followup.send(
-                "❌ You don't belong to any land on this server.", ephemeral=True
-            )
-
-        # Only the owner can purchase
-        if land["owner_id"] != interaction.user.id:
-            return await interaction.followup.send(
-                "❌ Only the land owner can purchase claim blocks.", ephemeral=True
-            )
-
-        # Weekday check (Mon=0 ... Fri=4)
-        now = datetime.now(timezone.utc)
-        if now.weekday() >= 5:
-            return await interaction.followup.send(
-                "🚫 Normal claim blocks can only be purchased **Monday–Friday**. "
-                "Use `/claim reserve` for weekend purchases.",
-                ephemeral=True,
-            )
-
-        # Weekly purchase restriction
-        existing_purchase = await db.get_normal_purchase_this_week(land["id"])
-        if existing_purchase:
-            return await interaction.followup.send(
-                "⚠️ Your land has already purchased a normal block this week. "
-                "The limit resets every Monday.",
-                ephemeral=True,
-            )
-
-        # Check approved request exists
-        approved = await db.get_approved_request(land["id"])
-        if not approved:
-            pending = await db.get_pending_request(land["id"])
-            if pending:
-                return await interaction.followup.send(
-                    "❌ Your claim request hasn't been approved yet. Staff must approve it first.",
-                    ephemeral=True,
-                )
-            return await interaction.followup.send(
-                "❌ You don't have an approved claim request. Use `/claim request` first.",
-                ephemeral=True,
-            )
-
-        # Calculate price
-        full_cost = await db.get_full_block_cost(interaction.guild_id)
-        price = models.block_price(land["chunks"], full_cost)
-
-        # Process purchase
-        new_chunks = land["chunks"] + approved["chunks_requested"]
-        await db.update_land_chunks(land["id"], new_chunks)
-        await db.record_purchase(land["id"], "normal", price)
-        await db.update_request_status(approved["id"], "purchased")
-        await db.add_ledger_owed(
-            land["id"], interaction.guild_id,
-            blocks=approved["chunks_requested"],
-            note=f"Weekly purchase ({approved['chunks_requested']} block(s) @ {price} ems)",
-            recorded_by=interaction.user.id,
-        )
-
-        embed = discord.Embed(
-            title="✅ Claim Block Purchased",
-            colour=discord.Colour.gold(),
-        )
-        embed.add_field(name="Land", value=land["name"], inline=True)
-        embed.add_field(name="Chunks Added", value=str(approved["chunks_requested"]), inline=True)
-        embed.add_field(name="Total Chunks", value=str(new_chunks), inline=True)
-        embed.add_field(name="Price Paid", value=f"{price} ems" if price > 0 else "Free", inline=True)
-        embed.set_footer(text="Next normal purchase available after Monday reset.")
-
-        await interaction.followup.send(embed=embed)
-
-    # ── /claim reserve ────────────────────────────────────────────────
-
-    @app_commands.command(name="reserve", description="Buy a reserve claim block (1.5× price, bypasses queue)")
+    @app_commands.command(name="reserve", description="Buy a reserve claim block (manual payment, 1.5× price, bypasses queue)")
     @app_commands.guild_only()
     async def claim_reserve(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        await self._checkout(interaction, kind="reserve")
 
-        land = await db.get_land_for_user(interaction.guild_id, interaction.user.id)
-        if not land:
-            return await interaction.followup.send(
-                "❌ You don't belong to any land on this server.", ephemeral=True
-            )
-
-        if land["owner_id"] != interaction.user.id:
-            return await interaction.followup.send(
-                "❌ Only the land owner can purchase claim blocks.", ephemeral=True
-            )
-
-        # Check reserve availability
-        reserve = await db.get_reserve(interaction.guild_id)
-        available = reserve["total_blocks"] - reserve["protected_min"]
-        if available <= 0:
-            return await interaction.followup.send(
-                f"🚫 No reserve blocks available for sale. "
-                f"({reserve['total_blocks']} in reserve, {reserve['protected_min']} protected)",
-                ephemeral=True,
-            )
-
-        # Calculate reserve price (1.5×)
-        full_cost = await db.get_full_block_cost(interaction.guild_id)
-        price = models.reserve_price(land["chunks"], full_cost)
-
-        # Process purchase
-        new_chunks = land["chunks"] + 1
-        await db.update_land_chunks(land["id"], new_chunks)
-        await db.update_reserve_blocks(interaction.guild_id, reserve["total_blocks"] - 1)
-        await db.record_purchase(land["id"], "reserve", price)
-        await db.add_ledger_owed(
-            land["id"], interaction.guild_id,
-            blocks=1,
-            note=f"Reserve purchase (1.5× @ {price} ems)",
-            recorded_by=interaction.user.id,
-        )
-
-        embed = discord.Embed(
-            title="🔒 Reserve Block Purchased",
-            colour=discord.Colour.purple(),
-            description="This purchase bypasses the queue.",
-        )
-        embed.add_field(name="Land", value=land["name"], inline=True)
-        embed.add_field(name="Total Chunks", value=str(new_chunks), inline=True)
-        embed.add_field(name="Price Paid", value=f"{price} ems (1.5× rate)", inline=True)
-        embed.add_field(
-            name="Reserve Remaining",
-            value=f"{reserve['total_blocks'] - 1} ({reserve['protected_min']} protected)",
-            inline=True,
-        )
-        embed.set_footer(text="Excess emeralds help subsidise smaller lands.")
-
-        await interaction.followup.send(embed=embed)
-
-    # ── /claim buy_leftover ───────────────────────────────────────────
-
-    @app_commands.command(name="buy_leftover", description="Buy a block from the Leftover Pool at normal price")
+    @app_commands.command(name="buy_leftover", description="Buy a block from the Leftover Pool at normal price using manual payment")
     @app_commands.guild_only()
     async def claim_buy_leftover(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-
-        land = await db.get_land_for_user(interaction.guild_id, interaction.user.id)
-        if not land:
-            return await interaction.followup.send(
-                "❌ You don't belong to any land on this server.", ephemeral=True
-            )
-
-        if land["owner_id"] != interaction.user.id:
-            return await interaction.followup.send(
-                "❌ Only the land owner can purchase claim blocks.", ephemeral=True
-            )
-
-        reserve = await db.get_reserve(interaction.guild_id)
-        leftovers = reserve.get("leftover_blocks", 0)
-        if leftovers <= 0:
-            return await interaction.followup.send(
-                "🚫 No blocks currently available in the Leftover Pool.",
-                ephemeral=True,
-            )
-
-        full_cost = await db.get_full_block_cost(interaction.guild_id)
-        price = models.block_price(land["chunks"], full_cost)
-
-        new_chunks = land["chunks"] + 1
-        await db.update_land_chunks(land["id"], new_chunks)
-        await db.add_leftover_blocks(interaction.guild_id, -1)
-        await db.record_purchase(land["id"], "leftover", price)
-        await db.add_ledger_owed(
-            land["id"], interaction.guild_id,
-            blocks=1,
-            note=f"Leftover pool purchase (@ {price} ems)",
-            recorded_by=interaction.user.id,
-        )
-
-        embed = discord.Embed(
-            title="🛒 Leftover Block Purchased",
-            colour=discord.Colour.green(),
-            description="Purchased from the Leftover Pool at normal tier price.",
-        )
-        embed.add_field(name="Land", value=land["name"], inline=True)
-        embed.add_field(name="Total Chunks", value=str(new_chunks), inline=True)
-        embed.add_field(name="Price Paid", value=f"{price} ems" if price > 0 else "Free", inline=True)
-        embed.add_field(name="Leftover Pool Remaining", value=str(leftovers - 1), inline=True)
-        embed.set_footer(text="Unbought leftover blocks move to Reserve at next weekly distribution.")
-
-        await interaction.followup.send(embed=embed)
+        await self._checkout(interaction, kind="leftover")
 
     # ── /claim approve ────────────────────────────────────────────────
 
@@ -324,7 +178,8 @@ class ClaimsCog(commands.GroupCog, name="claim"):
                 f"❌ **{land_name}** has no pending claim request.", ephemeral=True
             )
 
-        await db.update_request_status(pending["id"], "approved")
+        if not await db.update_request_status(pending["id"], "approved"):
+            return await interaction.followup.send("This request changed; refresh before acting.", ephemeral=True)
 
         full_cost = await db.get_full_block_cost(interaction.guild_id)
         price = models.block_price(land["chunks"], full_cost)
@@ -382,7 +237,8 @@ class ClaimsCog(commands.GroupCog, name="claim"):
                 f"❌ **{land_name}** has no pending claim request.", ephemeral=True
             )
 
-        await db.update_request_status(pending["id"], "denied")
+        if not await db.update_request_status(pending["id"], "denied"):
+            return await interaction.followup.send("This request changed; refresh before acting.", ephemeral=True)
 
         embed = discord.Embed(
             title="❌ Claim Request Denied",
