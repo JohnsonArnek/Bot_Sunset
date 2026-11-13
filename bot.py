@@ -71,6 +71,7 @@ EXTENSIONS = [
     "cogs.acclimations",
     "cogs.bank",
     "cogs.banners",
+    "cogs.libraries",
 ]
 
 
