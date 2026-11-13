@@ -124,6 +124,14 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         embed.add_field(name="Payment", value="Bank transfer to central treasury" if private else "Manual payment (no bank debit)", inline=False)
         if private:
             embed.add_field(name="Settlement balance after payment", value=f"{receipt['balance']:,} ems", inline=False)
+        if receipt.get("banner"):
+            b = receipt["banner"]
+            quantity = receipt["blocks"]
+            embed.add_field(name="Banner creation owed", value=(
+                f"{quantity:,} × {b['unit_cost']:,} = **{quantity*b['unit_cost']:,} ems** to be destroyed at creation.\n"
+                f"Land share: {quantity*b['land_unit']:,} · central subsidy: {quantity*(b['unit_cost']-b['land_unit']):,} ems.\n"
+                f"Land contribution prepaid by bank: {quantity*b['prepaid_unit']:,} ems.\n"
+                f"Track with /banner show purchase_id:{receipt['operation_id']}"), inline=False)
         embed.set_footer(text=f"Receipt #{receipt['operation_id']} · Delivery is recorded separately in the block ledger")
         await interaction.followup.send(embed=embed, ephemeral=private, allowed_mentions=discord.AllowedMentions.none())
 

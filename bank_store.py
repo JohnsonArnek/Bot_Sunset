@@ -114,6 +114,7 @@ async def _target(conn, guild, actor, *, admin, member=None, land_name=None, acc
 
 
 async def account(guild, actor, *, admin, page=1, **target):
+    import banner_store
     async with write(guild) as conn:
         row = await _target(conn, guild, actor, admin=admin, **target)
         balance = await _balance(conn, guild, row["id"])
@@ -121,7 +122,8 @@ async def account(guild, actor, *, admin, page=1, **target):
             f"SELECT e.delta,e.balance_after,o.id AS operation_id,o.actor_id,o.action,o.reason,o.created_at "
             f"FROM {table('entries')} e JOIN {table('operations')} o ON o.guild_id=e.guild_id AND o.id=e.operation_id "
             "WHERE e.guild_id=? AND e.account_id=? ORDER BY e.id DESC LIMIT 3 OFFSET ?", (guild, row["id"], (page-1)*3))
-        return row | dict(balance=balance, entries=entries)
+        banners = await banner_store.summary(conn, guild, row["id"]) if row["kind"] in ("land", "treasury") else None
+        return row | dict(balance=balance, entries=entries, banners=banners)
 
 
 async def accounts(guild, *, admin, page=1):
@@ -171,7 +173,7 @@ async def adjust(guild, actor, amount, reason, *, admin, request_id, withdraw=Fa
         row = await _target(conn, guild, actor, admin=True, **target)
         prior = await _replay(conn, guild, actor, request_id, action)
         if prior:
-            if prior["account_id"] != row["id"] or prior["amount"] != amount or prior["reason"] != reason:
+            if prior.get("account_id") != row["id"] or prior.get("amount") != amount or prior.get("reason") != reason:
                 raise ValueError("This interaction already recorded a different adjustment.")
             return prior
         delta = -amount if withdraw else amount
@@ -187,6 +189,7 @@ async def adjust(guild, actor, amount, reason, *, admin, request_id, withdraw=Fa
 
 
 async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"):
+    import banner_store
     if kind not in ("normal", "reserve", "leftover") or payment not in ("manual", "bank") or (payment == "bank" and kind != "normal"):
         raise ValueError("Bank transfer is available for /claim buy. Other claim purchases use manual payment.")
     async with write(guild) as conn:
@@ -231,6 +234,12 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
         total = unit * blocks
         if total > 2_000_000_000:
             raise ValueError("This purchase exceeds the supported transaction amount.")
+        banner = None
+        if kind == "normal":
+            creation_cost = await banner_store.unit_cost(conn, guild)
+            land_unit = min(unit, creation_cost)
+            banner = dict(unit_cost=creation_cost, land_unit=land_unit,
+                          prepaid_unit=land_unit if payment == "bank" else 0)
         entries, after = [], None
         if payment == "bank":
             payer = await _account(conn, guild, "land", land["id"], land["name"])
@@ -257,4 +266,9 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
                            (land["id"], guild, blocks, note, actor, at.isoformat()))
         receipt = dict(land_id=land["id"], land_name=land["name"], blocks=blocks, chunks=land["chunks"] + blocks,
                        unit_price=unit, total=total, payment=payment, balance=after, kind=kind)
-        return await _record(conn, guild, actor, request_id, f"claim-{kind}", note, receipt, entries)
+        if banner:
+            receipt["banner"] = banner
+        result = await _record(conn, guild, actor, request_id, f"claim-{kind}", note, receipt, entries)
+        if banner:
+            await banner_store.record_batch(conn, guild, result)
+        return result

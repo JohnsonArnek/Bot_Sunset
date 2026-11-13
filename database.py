@@ -212,6 +212,7 @@ async def init_db():
     from acclimation_store import schema as acclimation_schema
     from handbook_store import schema as handbook_schema
     from bank_store import schema as bank_schema
+    from banner_store import schema as banner_schema
     if IS_POSTGRES:
         conn = await asyncpg.connect(
             DATABASE_URL, timeout=10, command_timeout=10, statement_cache_size=0,
@@ -329,6 +330,7 @@ async def init_db():
             await conn.execute(acclimation_schema(True))
             await conn.execute(handbook_schema(True))
             await conn.execute(bank_schema(True))
+            await conn.execute(banner_schema(True))
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -456,6 +458,7 @@ async def init_db():
             await db.executescript(acclimation_schema(False))
             await db.executescript(handbook_schema(False))
             await db.executescript(bank_schema(False))
+            await db.executescript(banner_schema(False))
             async with db.execute("PRAGMA table_info(war_stock)") as cursor:
                 existing = {row[1] for row in await cursor.fetchall()}
             for column in ("iron", "arrows", "logs"):

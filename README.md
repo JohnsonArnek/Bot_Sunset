@@ -67,6 +67,51 @@ Administrator adjustments accept 1–1,000,000,000 ems per entry; balances are c
 at 1,000,000,000,000 ems, and claim receipts at 2,000,000,000 ems. No new environment
 variables are needed.
 
+## Claim banner creation
+
+Every new normal `/claim buy` records a creation liability for each approved
+block, separately from its purchase payment and delivery. The default cost is
+**37 ems per banner**. The land's share is its checkout price capped at the
+creation cost; the central budget owes the remainder. At a 7-ems claim price,
+one banner creates a 7-ems land liability and a 30-ems central subsidy. A land
+shortage never increases that subsidy. Above-cost sale proceeds remain in the
+treasury after creation (a 50-ems bank purchase leaves 13 after a 37-ems creation).
+
+| Command | Purpose |
+| --- | --- |
+| `/banner status land_name:Coppercross` | Owner/officers read the land's creation backlog and liabilities |
+| `/banner status` | Administrator sees all tracked purchases and total liabilities |
+| `/banner show purchase_id:123` | Fixed cost split and recent creation records for a purchase receipt |
+| `/banner create purchase_id:123 blocks:1 reason:Crafted` | Administrator records actual creation and debits bank funds |
+| `/banner create purchase_id:123 blocks:1 reason:Cash received and spent land_payment:physical` | Administrator confirms physical payment of the unpaid land share; treasury funds only its fixed subsidy |
+| `/banner cost amount:37` | Administrator changes the cost for future purchases; omit amount to read it |
+
+All banner replies are private. The creation step accepts partial batches,
+rejects quantities already created, and records who acted, when and why. It
+destroys the recorded cost rather than transferring it to another bank account.
+For manual claims, the default creation step debits the land share from its bank
+account and the subsidy from the treasury. Physical-payment confirmation is an
+explicit administrator assertion that the land contribution was received and
+spent outside the bank; it creates no extra credit. Never also deposit those same
+spent emeralds as new bank funds.
+
+Bank-paid claims have already transferred the land contribution into the
+treasury. Creation spends that contribution there, together with the subsidy,
+without charging the land twice. Both required balances are checked before any
+debit or creation record commits. A shortage leaves the entire batch unchanged;
+an administrator can fund the appropriate account or record fewer banners.
+
+`/bank balance` and `/bank treasury` show pending creation liabilities and bank
+funding needed. These are obligations, not reserved funds. Costs and subsidy
+splits are frozen at checkout; later config, ownership or tier changes do not
+rewrite them. Creation records and obligations survive land deletion.
+
+Creation is an administrator action. `/ledger deliver` still only records
+delivery and cannot spend money or clear creation liabilities. The tracker covers
+new normal purchases after deployment; it does not infer historical creation or
+backfill reserve, leftover, auction, rotation or manual ledger allocations.
+Private tables use the RLS-enabled `sunset_banners` schema alongside the bank.
+
 ## Acclimations and Sunrise honours
 
 Acclimations recognise deeds, with a dated record of the recipient, giver,

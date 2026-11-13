@@ -45,6 +45,14 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
         except ValueError as exc:
             return await reply(interaction, str(exc))
         lines = [f"**{account_name(row)} · account #{row['id']}**", f"Balance: **{row['balance']:,} ems**"]
+        if row["banners"]:
+            b = row["banners"]
+            share = b["land_share"] if row["kind"] == "land" else b["central_share"]
+            needed = b["land_share"]-b["prepaid"] if row["kind"] == "land" else b["central_share"]+b["prepaid"]
+            lines.append(f"**Banner creation liabilities** · {b['pending']:,} banners pending\n"
+                         f"This budget's share: **{share:,} ems** · bank funding still needed: **{needed:,} ems**\n"
+                         f"Land contributions already transferred to treasury: {b['prepaid']:,} ems.\n"
+                         "Funds are not reserved. Physical land payment can be confirmed by an administrator at creation.")
         if statement:
             lines.append(f"**Statement · page {page} · 3 entries per page**")
             for e in row["entries"]:
