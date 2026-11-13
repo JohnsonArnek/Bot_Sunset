@@ -118,8 +118,7 @@ class AuctionCog(commands.GroupCog, name="auction"):
             amount = bid["bid_amount"]
 
             # Give land +1 chunk and deduct 1 from reserve pool
-            old_chunks = bid["chunks"]
-            await db.update_land_chunks(land_id, old_chunks + 1)
+            await db.add_land_chunks(land_id, 1)
             await db.add_reserve_blocks(guild_id, -1)
             await db.record_purchase(land_id, "auction", amount)
             await db.add_ledger_owed(

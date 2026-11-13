@@ -320,8 +320,7 @@ class LandCog(commands.GroupCog, name="land"):
             return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
 
         old_chunks = land["chunks"]
-        new_chunks = max(0, old_chunks + amount)
-        await db.update_land_chunks(land["id"], new_chunks)
+        new_chunks = await db.add_land_chunks(land["id"], amount)
 
         change_str = f"+{amount}" if amount > 0 else str(amount)
         embed = discord.Embed(

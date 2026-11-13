@@ -193,8 +193,7 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 if result == "accept":
                     # Process the purchase
                     for _ in range(daily_blocks):
-                        chunks += 1
-                        await db.update_land_chunks(land_id, chunks)
+                        chunks = await db.add_land_chunks(land_id, 1)
                         await db.record_purchase(land_id, "rotation", price)
 
                     await db.update_rotation_offer(offer_id, "accepted")

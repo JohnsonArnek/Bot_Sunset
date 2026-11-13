@@ -13,6 +13,60 @@ See [Handbook setup and publishing](docs/HANDBOOKS.md) for access rules and the
 operator import tool. The schema is created on startup; new servers need an
 article import. No additional hosting service or environment variable is needed.
 
+## Central bank
+
+Each server has personal accounts, settlement accounts and a central treasury in
+whole emeralds (`ems`). Accounts start at zero and are available on first use;
+no member-registration sweep or new Discord roles are required. `/bank accounts`
+also opens accounts for all registered lands. Existing purchases are not charged
+retroactively and no opening funds are invented.
+
+| Command | Access and effect |
+| --- | --- |
+| `/bank balance` | Read your personal balance |
+| `/bank balance land_name:Coppercross` | Owners/officers read their settlement; administrators may read any |
+| `/bank statement` | Read dated entries, authorising user, reasons and running balances; same account selectors as balance |
+| `/bank deposit amount:100 reason:Received emeralds land_name:Coppercross` | Administrator credits a verified deposit |
+| `/bank withdraw amount:20 reason:Approved withdrawal member:@Name` | Administrator debits an approved withdrawal; insufficient funds are rejected |
+| `/bank accounts page:1` | Administrator directory of settlement, opened personal and treasury accounts |
+| `/bank treasury` | Administrator treasury balance and statement |
+
+Use one account selector at a time: `member`, `land_name`, or administrator-only
+`account_id`. Deposits and withdrawals require an explicit target and reason.
+Discord Administrator permission is required; the configured staff role, Hands,
+Tribunes and land officers cannot adjust balances. All bank replies are private.
+Deposits/withdrawals record an administrator's decision and do not move Minecraft
+items. The application preserves journal entries; correct mistakes with a new
+authorised adjustment explaining the original transaction.
+
+`/claim buy payment:bank` immediately transfers the complete purchase price from
+the settlement account to the central treasury. Only the current land owner can
+purchase. Existing approval, weekday and weekly-limit checks still apply. The
+price is the approved quantity multiplied by the per-block tier price at checkout
+(not progressive pricing across the batch). The private receipt shows the amount
+and settlement balance after payment. A free purchase needs no funds.
+
+Omit `payment`, or choose `manual`, to retain the manual-payment workflow with no
+bank debit. Reserve, leftover, rotation and auction purchases remain manual.
+Personal funds are never used automatically for land purchases. A shortage or
+database error leaves balances, approvals, purchases, chunks and the delivery
+ledger unchanged. Retries of the same interaction return its original receipt.
+Delivery still needs to be confirmed separately after the items arrive.
+
+Land accounts follow the stable land ID across ownership changes. Deleting a land
+or using `/sunset nuke` does not delete its bank history or money; administrators
+can inspect and reconcile the archived account using `account_id`. Reusing the
+same land name creates a separate zero-balance account. Personal accounts also
+remain recorded after a member leaves.
+
+Storage is created on startup in the private, RLS-enabled `sunset_bank` schema
+(SQLite is supported locally). Balances are sums of journal entries. Short
+leader-fenced transactions serialize bank/claim writes per server; a bank payment,
+treasury credit, purchase, chunk allocation and delivery obligation commit together.
+Administrator adjustments accept 1–1,000,000,000 ems per entry; balances are capped
+at 1,000,000,000,000 ems, and claim receipts at 2,000,000,000 ems. No new environment
+variables are needed.
+
 ## Acclimations and Sunrise honours
 
 Acclimations recognise deeds, with a dated record of the recipient, giver,

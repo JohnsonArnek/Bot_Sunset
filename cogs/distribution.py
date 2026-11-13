@@ -152,7 +152,8 @@ class DistributionCog(commands.Cog):
         total_returned = 0
 
         for req in expired_requests:
-            await db.update_request_status(req["id"], "expired")
+            if not await db.update_request_status(req["id"], "expired"):
+                continue  # Checkout may have completed since the expiry scan.
             await db.add_reserve_blocks(guild.id, req["chunks_requested"])
             total_returned += req["chunks_requested"]
 
@@ -205,7 +206,8 @@ class DistributionCog(commands.Cog):
             requested = req["chunks_requested"]
 
             if requested <= available:
-                await db.update_request_status(req["id"], "approved")
+                if not await db.update_request_status(req["id"], "approved"):
+                    continue
                 available -= requested
                 total_used += requested
 
@@ -217,8 +219,8 @@ class DistributionCog(commands.Cog):
                 )
             else:
                 original_requested = requested
-                await db.update_request_chunks(req["id"], available)
-                await db.update_request_status(req["id"], "approved")
+                if not await db.approve_partial_request(req["id"], available):
+                    continue
                 total_used += available
                 partial_count += 1
 
