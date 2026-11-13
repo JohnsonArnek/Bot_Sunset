@@ -112,6 +112,42 @@ new normal purchases after deployment; it does not infer historical creation or
 backfill reserve, leftover, auction, rotation or manual ledger allocations.
 Private tables use the RLS-enabled `sunset_banners` schema alongside the bank.
 
+## Public settlement libraries
+
+Each registered settlement can list one public library with a name, location
+(coordinates/dimension or directions), description and a catalogue of books.
+Everyone in the same Discord server can browse it. These catalogues are separate
+from the permission-scoped bot handbooks: they list in-game books, not their full
+texts, and do not track loans or move items.
+
+| Command | Purpose |
+| --- | --- |
+| `/library list page:1` | Browse settlement libraries |
+| `/library view land_name:Coppercross page:1` | Read the location and book list |
+| `/library search query:History page:1` | Search titles and authors across this server |
+| `/library set name:Coppercross Library location:Town square land_name:Coppercross` | Owner/officer/admin registers or updates the library |
+| `/library add title:History of Sunset author:Enki copies:2` | Add a public book listing; optional description and land_name |
+| `/library edit book_id:123 copies:3` | Update a book's total copies or other details |
+| `/library remove book_id:123` | Remove a listing |
+
+Current owners and officers manage their own land; Discord administrators can
+manage any land by name or book ID. Omit land_name when you manage exactly one
+settlement. Changing ownership or officer appointments changes access immediately.
+The staff role alone does not grant catalogue editing access.
+
+Browse results are public channel replies. Editing confirmations are private,
+but all saved names, locations and book details are publicly readable on that
+server. No mention notifications are sent. Three entries appear per page. Each
+library supports up to 500 title/author pairs; duplicate pairs ignore case and
+normalise Unicode. Use edit to update copies (0–1,000,000), or distinguish an
+edition in its title. Missing authors default to Unknown. A zero-copy listing
+remains visible. Updating library details preserves its books.
+
+Deleting a settlement or resetting its land records removes its library and
+books; a new land using the same name starts without a catalogue. Storage uses
+private, RLS-enabled `sunset_libraries` tables; public means discoverable through
+the Discord commands, not anonymously writable through the database API.
+
 ## Acclimations and Sunrise honours
 
 Acclimations recognise deeds, with a dated record of the recipient, giver,

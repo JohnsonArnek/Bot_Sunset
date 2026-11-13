@@ -213,6 +213,7 @@ async def init_db():
     from handbook_store import schema as handbook_schema
     from bank_store import schema as bank_schema
     from banner_store import schema as banner_schema
+    from library_store import schema as library_schema
     if IS_POSTGRES:
         conn = await asyncpg.connect(
             DATABASE_URL, timeout=10, command_timeout=10, statement_cache_size=0,
@@ -331,6 +332,7 @@ async def init_db():
             await conn.execute(handbook_schema(True))
             await conn.execute(bank_schema(True))
             await conn.execute(banner_schema(True))
+            await conn.execute(library_schema(True))
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -459,6 +461,7 @@ async def init_db():
             await db.executescript(handbook_schema(False))
             await db.executescript(bank_schema(False))
             await db.executescript(banner_schema(False))
+            await db.executescript(library_schema(False))
             async with db.execute("PRAGMA table_info(war_stock)") as cursor:
                 existing = {row[1] for row in await cursor.fetchall()}
             for column in ("iron", "arrows", "logs"):
@@ -595,7 +598,7 @@ async def get_all_lands(guild_id: int) -> list[dict]:
 
 async def delete_land(land_id: int):
     """Delete a land by ID (cascades to members, requests, purchases, officers, and rotation)."""
-    async with DBConnection() as conn:
+    async with DBConnection() as conn, conn.transaction():
         row = await conn.fetchone("SELECT guild_id FROM lands WHERE id = ?", (land_id,))
         guild_id = row["guild_id"] if row else None
         await conn.execute("DELETE FROM officers WHERE land_id = ?", (land_id,))
