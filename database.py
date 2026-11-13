@@ -210,6 +210,7 @@ def war_schema(postgres: bool) -> str:
 async def init_db():
     """Create all tables if they don't exist and run schema migrations. Called on startup."""
     from acclimation_store import schema as acclimation_schema
+    from handbook_store import schema as handbook_schema
     if IS_POSTGRES:
         conn = await asyncpg.connect(
             DATABASE_URL, timeout=10, command_timeout=10, statement_cache_size=0,
@@ -325,6 +326,7 @@ async def init_db():
             # ── Migrations for existing databases ──
             await conn.execute(war_schema(True))
             await conn.execute(acclimation_schema(True))
+            await conn.execute(handbook_schema(True))
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -450,6 +452,7 @@ async def init_db():
             # Soft migrations
             await db.executescript(war_schema(False))
             await db.executescript(acclimation_schema(False))
+            await db.executescript(handbook_schema(False))
             async with db.execute("PRAGMA table_info(war_stock)") as cursor:
                 existing = {row[1] for row in await cursor.fetchall()}
             for column in ("iron", "arrows", "logs"):

@@ -7,3 +7,4 @@ __pycache__/
 !.env.example
 .pytest_cache/
 supabase/.temp/
+*.handbooks.private.json

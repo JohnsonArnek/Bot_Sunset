@@ -1,5 +1,18 @@
 # Sunset bot
 
+## Discord handbooks
+
+Use `/sunset help` for a private library matched to your server responsibilities,
+or `/sunset help topic:...` to search and open an article directly. Handbooks cover
+citizens, settlement leadership, Tribunes, Hands, civil administration, war and
+logistics, and bot administration. Menus and search suggestions only show articles
+you can read. Reading a guide does not grant permission to run its commands.
+
+Articles are stored privately per server, outside this public repository.
+See [Handbook setup and publishing](docs/HANDBOOKS.md) for access rules and the
+operator import tool. The schema is created on startup; new servers need an
+article import. No additional hosting service or environment variable is needed.
+
 ## Acclimations and Sunrise honours
 
 Acclimations recognise deeds, with a dated record of the recipient, giver,
