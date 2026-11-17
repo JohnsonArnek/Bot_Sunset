@@ -9,12 +9,14 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
+import banner_account
+import banner_store
 
 VALID_KEYS = {
-    "full_block_cost": "Price for the 26+ chunks tier (integer ems)",
+    "full_block_cost": "Banner creation cost and full claim price (administrator setting)",
     "staff_role_id": "Discord role ID for staff permissions",
     "weekly_reset_day": "Day of week for weekly reset (0=Mon, 6=Sun)",
-    "weekly_blocks": "Blocks generated per weekly distribution (default 7)",
+    "weekly_blocks": "Banners generated per week, effective next Monday UTC (default 7)",
     "distribution_day": "Day of week for distribution (0=Mon, 6=Sun)",
     "distribution_hour": "Hour (UTC) for distribution (0-23)",
     "max_queue_chunks": "Max chunks a land can request per queue submission (default 1)",
@@ -62,7 +64,20 @@ class ConfigCog(commands.GroupCog, name="config"):
         if not await _is_staff(interaction):
             return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
 
-        await db.set_config(interaction.guild_id, key.value, value)
+        if key.value in ("full_block_cost", "weekly_blocks"):
+            try:
+                amount = int(value)
+            except ValueError:
+                return await interaction.followup.send("Enter a whole number.", ephemeral=True)
+            try:
+                if key.value == "full_block_cost":
+                    await banner_store.cost(interaction.guild_id, admin=interaction.user.guild_permissions.administrator, amount=amount)
+                else:
+                    await banner_account.set_weekly_production(interaction.guild_id, amount)
+            except ValueError as exc:
+                return await interaction.followup.send(str(exc), ephemeral=True)
+        else:
+            await db.set_config(interaction.guild_id, key.value, value)
         if key.value == "protected_min":
             try:
                 await db.update_protected_min(interaction.guild_id, int(value))

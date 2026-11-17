@@ -19,7 +19,7 @@ IS_POSTGRES = DATABASE_URL is not None and (DATABASE_URL.startswith("postgres://
 DB_PATH = "claims.db"
 
 DEFAULT_CONFIG = {
-    "full_block_cost": "50",
+    "banner_creation_cost": "37",
     "staff_role_id": "0",
     "weekly_reset_day": "0",
     "weekly_blocks": "7",
@@ -483,6 +483,8 @@ async def init_db():
 # ── Config helpers ────────────────────────────────────────────────────
 
 async def get_config(guild_id: int, key: str) -> str:
+    if key == "full_block_cost":
+        key = "banner_creation_cost"
     async with DBConnection() as conn:
         row = await conn.fetchone(
             "SELECT value FROM config WHERE guild_id = ? AND key = ?",
@@ -494,6 +496,8 @@ async def get_config(guild_id: int, key: str) -> str:
 
 
 async def set_config(guild_id: int, key: str, value: str):
+    if key == "full_block_cost":
+        key = "banner_creation_cost"
     async with DBConnection() as conn:
         if IS_POSTGRES:
             await conn.execute(
@@ -510,8 +514,9 @@ async def set_config(guild_id: int, key: str, value: str):
 
 
 async def get_full_block_cost(guild_id: int) -> int:
-    val = await get_config(guild_id, "full_block_cost")
-    return int(val) if val else 50
+    from banner_store import unit_cost
+    async with DBConnection() as conn:
+        return await unit_cost(conn, guild_id)
 
 
 async def get_staff_role_id(guild_id: int) -> int:
@@ -787,12 +792,15 @@ async def get_expired_approved_requests(guild_id: int, days: int = 7) -> list[di
 # ── Purchase helpers ──────────────────────────────────────────────────
 
 async def record_purchase(land_id: int, purchase_type: str, price_paid: int):
-    now = datetime.now(timezone.utc).isoformat()
+    from banner_account import record_allocation_sale
+    import bank_store
     async with DBConnection() as conn:
-        await conn.execute(
-            "INSERT INTO purchases (land_id, type, price_paid, purchased_at) VALUES (?, ?, ?, ?)",
-            (land_id, purchase_type, price_paid, now),
-        )
+        land = await conn.fetchone("SELECT guild_id FROM lands WHERE id=?", (land_id,))
+    if not land:
+        raise ValueError("This settlement no longer exists.")
+    guild = land["guild_id"]
+    async with bank_store.write(guild) as conn:
+        await record_allocation_sale(conn, guild, land_id, purchase_type, price_paid, 1, bank_store.now())
 
 
 async def get_normal_purchase_this_week(land_id: int) -> dict | None:
@@ -1171,24 +1179,29 @@ async def get_ledger_history(land_id: int, limit: int = 10) -> list[dict]:
         )
 
 
-async def get_all_ledger_status(guild_id: int) -> list[dict]:
-    """Return balance summary for every land in this guild that has any ledger entries."""
-    async with DBConnection() as conn:
+async def get_all_ledger_status(guild_id: int, land_id: int = None) -> list[dict]:
+    """Read delivery and payment counts without joining individual deliveries to purchases."""
+    import banner_store
+    import bank_store
+    params = (guild_id, land_id) if land_id is not None else (guild_id,)
+    async with bank_store.write(guild_id) as conn:
         rows = await conn.fetchall(
             "SELECT l.id as land_id, l.name as land_name, l.owner_id, "
             "COALESCE(SUM(CASE WHEN b.type = 'owed' THEN b.blocks ELSE 0 END), 0) as total_owed, "
             "COALESCE(SUM(CASE WHEN b.type = 'delivered' THEN b.blocks ELSE 0 END), 0) as total_delivered "
             "FROM lands l "
-            "LEFT JOIN block_ledger b ON l.id = b.land_id "
-            "WHERE l.guild_id = ? "
-            "GROUP BY l.id, l.name, l.owner_id "
-            "ORDER BY (COALESCE(SUM(CASE WHEN b.type = 'owed' THEN b.blocks ELSE 0 END), 0) "
-            "         - COALESCE(SUM(CASE WHEN b.type = 'delivered' THEN b.blocks ELSE 0 END), 0)) DESC, l.name ASC",
-            (guild_id,),
-        )
-        # Attach outstanding calculation
-        result = []
-        for r in rows:
-            outstanding = r["total_owed"] - r["total_delivered"]
-            result.append({**r, "outstanding": outstanding})
-        return result
+            "LEFT JOIN block_ledger b ON l.id=b.land_id AND l.guild_id=b.guild_id "
+            "WHERE l.guild_id=?" + (" AND l.id=?" if land_id is not None else "") +
+            " GROUP BY l.id,l.name,l.owner_id", params)
+        payments = await conn.fetchall(banner_store.payment_counts_query(by_land=True, filter_land=land_id is not None), params*2)
+        lands = {row["land_id"]: row for row in rows}
+        for payment in payments:
+            # Bank receipts outlive the land. Its delivery ledger may have been removed.
+            land = lands.setdefault(payment["land_id"], dict(land_id=payment["land_id"], land_name=payment["land_name"],
+                                    owner_id=None,total_owed=0,total_delivered=0))
+            land["payments"] = payment
+        for land in lands.values():
+            land["outstanding"] = land["total_owed"] - land["total_delivered"]
+            land.setdefault("payments", {})
+        return sorted(lands.values(), key=lambda row: (-row["payments"].get("due_ems", 0),
+                      -row["outstanding"], row["land_name"].casefold(), row["land_id"]))

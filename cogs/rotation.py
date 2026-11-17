@@ -17,6 +17,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import database as db
+import banner_account
 import models
 
 log = logging.getLogger("claims-bot")
@@ -191,22 +192,8 @@ class RotationCog(commands.GroupCog, name="rotation"):
                 result, reactor_id = await self._wait_for_reaction(guild.id, msg, timeout_minutes * 60, skip_event)
 
                 if result == "accept":
-                    # Process the purchase
-                    for _ in range(daily_blocks):
-                        chunks = await db.add_land_chunks(land_id, 1)
-                        await db.record_purchase(land_id, "rotation", price)
-
-                    await db.update_rotation_offer(offer_id, "accepted")
-                    await db.move_to_bottom(guild.id, land_id)
-
-                    # Record in delivery ledger — leader now owes this land N blocks
-                    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                    await db.add_ledger_owed(
-                        land_id, guild.id,
-                        blocks=daily_blocks,
-                        note=f"Rotation {today_str}",
-                        recorded_by=self.bot.user.id if self.bot.user else None,
-                    )
+                    chunks = await banner_account.accept_rotation(guild.id, offer_id, land_id, daily_blocks,
+                        price, full_block_cost, self.bot.user.id if self.bot.user else None)
 
                     reactor_str = f" (via <@{reactor_id}>)" if reactor_id else ""
                     confirm_embed = discord.Embed(

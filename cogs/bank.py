@@ -5,6 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import bank_store as store
+import banner_account
 from cogs.war_share import message_payload
 
 
@@ -35,8 +36,49 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
     async def interaction_check(self, interaction):
         if interaction.guild_id is None:
             raise app_commands.NoPrivateMessage()
-        await interaction.response.defer(ephemeral=True)
+        public = getattr(getattr(interaction, "command", None), "name", None) == "public"
+        await interaction.response.defer(ephemeral=not public)
         return True
+
+    @app_commands.command(name="public", description="Show the server's public banner account and treasury balance")
+    @app_commands.choices(period=[app_commands.Choice(name="This week", value="week"),
+                                  app_commands.Choice(name="Since tracking began", value="all")])
+    async def public_account(self, interaction: discord.Interaction, period: str = "week"):
+        try:
+            report = await banner_account.statement(interaction.guild_id, all_time=period == "all")
+        except ValueError as exc:
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        title = "Public banner account"
+        window = "Since" if period == "all" else "Week of"
+        embed = discord.Embed(title=title, description=f"{window} {report['since']} · Monday UTC", colour=discord.Colour.gold())
+        sold = cleared = net = transferred = revenue = 0
+        for key, label in (("full", "Full price"), ("reduced", "Reduced and free"), ("reserve", "Reserve and auctions"),
+                           ("other", "Other above-cost sales")):
+            sale = report["sales"].get(key)
+            if key == "other" and not sale:
+                continue
+            quantity, income, basis = (sale[k] if sale else 0 for k in ("sold", "revenue", "cost"))
+            sold += quantity
+            revenue += income
+            net += income-basis
+            if sale:
+                cleared += sale["released"]
+                transferred += sale["transferred"]
+            embed.add_field(name=label, value=f"{quantity:,} sold · {income:,} ems in sales\nSale result **{income-basis:+,} ems**", inline=False)
+        embed.add_field(name="Period totals", value=f"Assumed made **{report['produced']:,}** · sold **{sold:,}** · "
+                        f"released from tracked stock **{cleared:,}**\nNet on sales **{net:+,} ems**\n"
+                        f"Bank transfers at checkout **{transferred:,} ems** · manual sales **{revenue-transferred:,} ems**", inline=False)
+        embed.add_field(name="Outstanding now, including prior weeks",
+                        value=f"**{report['unsold']:,} unsold × {report['cost']:,} ems = {report['liability']:,} ems liability**\n"
+                        f"All-time sale result less unsold liability **{report['position']:+,} ems**",
+                        inline=False)
+        embed.add_field(name="Central treasury bank balance", value=f"**{report['treasury']:,} ems**")
+        payments = report["payments"]
+        embed.add_field(name="Manual payments still owed by settlements",
+                        value=f"**{payments['due_blocks']:,} banners · {payments['due_ems']:,} ems to collect** "
+                        "across all tracked receipts.", inline=False)
+        embed.set_footer(text="Sales are booked at purchase. Manual amounts are sale prices. Unsold banners are valued at the current creation cost.")
+        await interaction.followup.send(embed=embed, ephemeral=False, allowed_mentions=discord.AllowedMentions.none())
 
     async def read(self, interaction, member, land_name, account_id, page=1, statement=False, treasury=False):
         try:
@@ -49,10 +91,12 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
             b = row["banners"]
             share = b["land_share"] if row["kind"] == "land" else b["central_share"]
             needed = b["land_share"]-b["prepaid"] if row["kind"] == "land" else b["central_share"]+b["prepaid"]
-            lines.append(f"**Banner creation liabilities** · {b['pending']:,} banners pending\n"
+            lines.append(f"**Creation funding for sold banners** · {b['pending']:,} awaiting settlement\n"
                          f"This budget's share: **{share:,} ems** · bank funding still needed: **{needed:,} ems**\n"
                          f"Land contributions already transferred to treasury: {b['prepaid']:,} ems.\n"
                          "Funds are not reserved. Physical land payment can be confirmed by an administrator at creation.")
+            if b["premium_due"]:
+                lines.append(f"Manual reserve premiums due to the treasury: **{b['premium_due']:,} ems**.")
         if statement:
             lines.append(f"**Statement · page {page} · 3 entries per page**")
             for e in row["entries"]:

@@ -127,7 +127,12 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         if receipt.get("banner"):
             b = receipt["banner"]
             quantity = receipt["blocks"]
-            embed.add_field(name="Banner creation owed", value=(
+            if "sale_result" in receipt:
+                released = receipt["released_blocks"]
+                embed.add_field(name="Public banner account", value=(
+                    f"Unsold liability cleared **{released:,} × {b['unit_cost']:,} = {released*b['unit_cost']:,} ems**\n"
+                    f"Sale result **{receipt['sale_result']:+,} ems** · see /bank public"), inline=False)
+            embed.add_field(name="Creation funding to settle", value=(
                 f"{quantity:,} × {b['unit_cost']:,} = **{quantity*b['unit_cost']:,} ems** to be destroyed at creation.\n"
                 f"Land share: {quantity*b['land_unit']:,} · central subsidy: {quantity*(b['unit_cost']-b['land_unit']):,} ems.\n"
                 f"Land contribution prepaid by bank: {quantity*b['prepaid_unit']:,} ems.\n"
@@ -143,15 +148,19 @@ class ClaimsCog(commands.GroupCog, name="claim"):
     async def claim_buy(self, interaction: discord.Interaction, payment: str = "manual"):
         await self._checkout(interaction, payment=payment)
 
-    @app_commands.command(name="reserve", description="Buy a reserve claim block (manual payment, 1.5× price, bypasses queue)")
+    @app_commands.command(name="reserve", description="Buy a reserve claim at 1.5× the full banner price, rounded up")
+    @app_commands.choices(payment=[app_commands.Choice(name="Manual payment", value="manual"),
+                                  app_commands.Choice(name="Bank transfer", value="bank")])
     @app_commands.guild_only()
-    async def claim_reserve(self, interaction: discord.Interaction):
-        await self._checkout(interaction, kind="reserve")
+    async def claim_reserve(self, interaction: discord.Interaction, payment: str = "manual"):
+        await self._checkout(interaction, kind="reserve", payment=payment)
 
-    @app_commands.command(name="buy_leftover", description="Buy a block from the Leftover Pool at normal price using manual payment")
+    @app_commands.command(name="buy_leftover", description="Buy a leftover block at your settlement's normal price")
+    @app_commands.choices(payment=[app_commands.Choice(name="Manual payment", value="manual"),
+                                  app_commands.Choice(name="Bank transfer", value="bank")])
     @app_commands.guild_only()
-    async def claim_buy_leftover(self, interaction: discord.Interaction):
-        await self._checkout(interaction, kind="leftover")
+    async def claim_buy_leftover(self, interaction: discord.Interaction, payment: str = "manual"):
+        await self._checkout(interaction, kind="leftover", payment=payment)
 
     # ── /claim approve ────────────────────────────────────────────────
 

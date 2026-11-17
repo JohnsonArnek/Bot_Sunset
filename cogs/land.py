@@ -74,7 +74,7 @@ class LandCog(commands.GroupCog, name="land"):
         full_cost = await db.get_full_block_cost(interaction.guild_id)
         price = models.block_price(land["chunks"], full_cost)
         tier = models.price_tier_label(land["chunks"], full_cost)
-        res_price = models.reserve_price(land["chunks"], full_cost)
+        res_price = models.reserve_price(full_cost)
 
         pending = await db.get_pending_request(land["id"])
         if pending:
