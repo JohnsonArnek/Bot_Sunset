@@ -249,6 +249,51 @@ async def quests(guild, page=1):
                                    "ORDER BY id DESC LIMIT 5 OFFSET ?", (guild, (page - 1) * 5))
 
 
+QUEST_PAGE_SIZE = 10
+
+
+def _quest_search(query):
+    query = " ".join((query or "").split())
+    if len(query) > 80:
+        raise ValueError("Keep the quest search to 80 characters or fewer.")
+    if not query:
+        return query, "", ()
+    pattern = "%" + query.lower().replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+    return query, " AND (LOWER(q.title) LIKE ? ESCAPE '!' OR LOWER(q.details) LIKE ? ESCAPE '!' OR CAST(q.id AS TEXT)=?)", (pattern,pattern,query.lstrip("#"))
+
+
+async def quest_board(guild, member, *, page=1, query="", unrewarded=False):
+    """Page open quests with this reader's reward status; voids still consume claims."""
+    if type(page) is not int or page < 1:
+        page = 1
+    query, search, params = _quest_search(query)
+    base = (f"FROM {_table('quests')} q LEFT JOIN {_table('awards')} a "
+            "ON a.guild_id=q.guild_id AND a.quest_id=q.id AND a.recipient_id=? "
+            "WHERE q.guild_id=? AND q.status='open'" + search + (" AND a.id IS NULL" if unrewarded else ""))
+    params = (member,guild) + params
+    async with db.DBConnection() as conn:
+        count = await conn.fetchone("SELECT COUNT(*) AS total " + base,params)
+        pages = max(1,(count["total"]+QUEST_PAGE_SIZE-1)//QUEST_PAGE_SIZE)
+        page = min(page,pages)
+        rows = await conn.fetchall("SELECT q.*,a.id AS award_id,a.voided_at AS award_voided_at " + base +
+                                  " ORDER BY q.id DESC LIMIT ? OFFSET ?",params+(QUEST_PAGE_SIZE,(page-1)*QUEST_PAGE_SIZE))
+        return dict(rows=rows,total=count["total"],page=page,pages=pages,query=query)
+
+
+async def quest_for_reader(guild, member, quest_id):
+    async with db.DBConnection() as conn:
+        return await conn.fetchone(f"SELECT q.*,a.id AS award_id,a.voided_at AS award_voided_at FROM {_table('quests')} q "
+                                   f"LEFT JOIN {_table('awards')} a ON a.guild_id=q.guild_id AND a.quest_id=q.id AND a.recipient_id=? "
+                                   "WHERE q.guild_id=? AND q.id=?",(member,guild,quest_id))
+
+
+async def quest_suggestions(guild, query=""):
+    _, search, params = _quest_search(query)
+    async with db.DBConnection() as conn:
+        return await conn.fetchall(f"SELECT q.id,q.title,q.status FROM {_table('quests')} q WHERE q.guild_id=?" + search +
+                                   " ORDER BY CASE WHEN q.status='open' THEN 0 ELSE 1 END,q.id DESC LIMIT 25",(guild,)+params)
+
+
 async def close_quest(guild, actor, quest_id, *, admin):
     async with _write(guild) as conn:
         await _quest_authority(conn, guild, actor, admin)

@@ -8,6 +8,7 @@ from discord.ext import commands
 
 import acclimation_store as store
 from cogs.war_share import message_payload
+from cogs.quest_browser import open_board, choices as quest_choices
 
 
 Amount = app_commands.Range[int, 1, 1_000_000]
@@ -189,17 +190,26 @@ class QuestCog(GuildReplies, commands.GroupCog, name="quest", group_description=
         await perform(interaction, store.create_quest(interaction.guild_id, interaction.user.id, title, details, reward,
                                                     admin=interaction.permissions.administrator, request_id=interaction.id), quest_text)
 
-    @app_commands.command(name="list", description="List open quests and their rewards")
-    async def quest_list(self, interaction: discord.Interaction, page: Page = 1):
-        rows = await store.quests(interaction.guild_id, page)
-        lines = [f"**Open quests · page {page}**"]
-        lines.extend(f"**#{r['id']} · {safe(r['title'])}** · {r['reward']:,} Acclimations" for r in rows)
-        lines.append("Use /quest show with the ID for details." if rows else "No open quests on this page.")
-        await reply(interaction, "\n".join(lines))
+    @app_commands.command(name="list", description="Browse open quests with selectable details, filters and page buttons")
+    @app_commands.describe(query="Optional words from the title or requirements, or a quest ID")
+    async def quest_list(self, interaction: discord.Interaction, page: Page = 1,
+                         query: app_commands.Range[str,1,80] = None):
+        await open_board(interaction,page=page,query=query or "")
 
     @app_commands.command(description="Read a quest's requirements and reward")
-    async def show(self, interaction: discord.Interaction, quest_id: RecordID):
-        await reply(interaction, quest_text(await store.get_quest(interaction.guild_id, quest_id)))
+    @app_commands.describe(quest_id="Type a title and choose a suggestion, or enter a quest ID")
+    async def show(self, interaction: discord.Interaction, quest_id: app_commands.Range[str,1,80]):
+        try:
+            number = int(str(quest_id).strip().lstrip("#"))
+            if not 1 <= number <= 2**53-1:
+                raise ValueError()
+        except ValueError:
+            return await reply(interaction,"Choose a suggested quest, or enter its numeric ID.")
+        await open_board(interaction,quest_id=number)
+
+    @show.autocomplete("quest_id")
+    async def show_choices(self, interaction: discord.Interaction, current: str):
+        return await quest_choices(interaction,current)
 
     @app_commands.command(description="[Hand/Admin] Approve a member's quest completion and record their deed")
     async def complete(self, interaction: discord.Interaction, quest_id: RecordID, member: discord.Member, deed: Deed):

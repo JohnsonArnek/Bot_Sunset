@@ -219,7 +219,7 @@ class AcclimationCommands(unittest.IsolatedAsyncioTestCase):
         self.cog, self.quest = AcclimationCog(), QuestCog()
         self.actor = SimpleNamespace(id=1, bot=False)
         self.member = SimpleNamespace(id=2, bot=False)
-        self.interaction = SimpleNamespace(id=100, guild_id=10, user=self.actor,
+        self.interaction = SimpleNamespace(id=100, guild_id=10, channel_id=50, user=self.actor,
                                            permissions=discord.Permissions(administrator=True),
                                            response=AsyncMock(), followup=AsyncMock())
 
