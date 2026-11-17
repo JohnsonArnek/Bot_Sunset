@@ -185,6 +185,26 @@ names do not automatically grant Acclimation authority.
 | Approve completion and record the deed (Hand or administrator) | `/quest complete quest_id:123 member:@Name deed:Finished the monument` |
 | Close a quest to further completions (Hand or administrator) | `/quest close quest_id:123` |
 
+`/quest list` opens a private interactive quest board, with ten open quests per
+page. Select a title from the dropdown to read requirements, reward, issuer and
+your own reward status; use Previous, Next, Back to list and Refresh to navigate
+the same message. `/quest list query:roads` searches titles, requirements or an
+exact quest ID. The filter offers All open quests or Not yet rewarded; voided
+awards still count as previously rewarded because they cannot be claimed again.
+Search and filter choices stay in place when returning from a quest.
+
+`/quest show quest_id:123` opens the same detail panel. Its quest_id option now
+accepts text so typing a title provides suggestions; selecting one supplies its
+ID. Old numeric IDs still work, including closed quests. Titles are navigation
+choices inside Discord, not links to public quest messages or external pages.
+
+Navigation reloads current quest and reward data. A closed quest disappears from
+the open list and shows its closed state if it was already selected. Menus belong
+to the reader, server and channel that opened them and expire after ten minutes
+of inactivity; rerun the command after expiry or a bot restart. Browsing does not
+enrol a player or grant a reward. Hands/admins still use `/quest complete` to
+approve a deed, and another official must approve their own quest completion.
+
 Profiles default to yourself. The honours board lists eligibility for the
 **Sunrise Copper Medal**: **Third Class at 10**, **Second Class at 30**, and
 **First Class at 50**. Awards that cross a threshold flag readiness for a

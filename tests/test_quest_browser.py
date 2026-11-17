@@ -1,0 +1,230 @@
+import asyncio
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
+
+import discord
+
+import acclimation_store as store
+import database as db
+from cogs import quest_browser as browser
+from cogs.acclimations import QuestCog
+
+
+def interaction(user=10,guild=100,channel=50):
+    return SimpleNamespace(id=100,user=SimpleNamespace(id=user),guild_id=guild,channel_id=channel,
+        permissions=discord.Permissions.none(),response=AsyncMock(),followup=AsyncMock(),edit_original_response=AsyncMock())
+
+
+class QueryContract:
+    async def quest(self,title="Repair roads",details="Northern road repairs",guild=None,request_id=1):
+        return await store.create_quest(guild or self.guild,900,title,details,3,admin=True,request_id=request_id)
+
+    async def test_pages_search_and_closure_are_server_scoped(self):
+        for n in range(12):
+            await self.quest(title=f"Road work {n}",request_id=n+1)
+        await self.quest(title="Other server road",guild=self.guild+1)
+        first=await store.quest_board(self.guild,10,query="road")
+        self.assertEqual((first["total"],first["pages"],len(first["rows"])),(12,2,10))
+        last=await store.quest_board(self.guild,10,page=99,query="road")
+        self.assertEqual((last["page"],len(last["rows"])),(2,2))
+        for row in last["rows"]:
+            await store.close_quest(self.guild,900,row["id"],admin=True)
+        refreshed=await store.quest_board(self.guild,10,page=2,query="road")
+        self.assertEqual((refreshed["page"],refreshed["total"]),(1,10))
+        self.assertIsNone(await store.quest_for_reader(self.guild+1,10,first["rows"][0]["id"]))
+
+    async def test_reward_filter_includes_voided_claims_as_used(self):
+        q=await self.quest()
+        other=await self.quest(title="Another task",request_id=2)
+        award=await store.complete_quest(self.guild,900,q["id"],10,"Finished the road",admin=True,request_id=3)
+        row=await store.quest_for_reader(self.guild,10,q["id"])
+        self.assertEqual(row["award_id"],award["id"])
+        self.assertIsNone((await store.quest_for_reader(self.guild,11,q["id"]))["award_id"])
+        await store.void_award(self.guild,900,award["id"],"Correction",admin=True)
+        board=await store.quest_board(self.guild,10,unrewarded=True)
+        self.assertEqual([r["id"] for r in board["rows"]],[other["id"]])
+        self.assertIsNotNone((await store.quest_for_reader(self.guild,10,q["id"]))["award_voided_at"])
+        self.assertEqual((await store.quest_board(self.guild,11,unrewarded=True))["total"],2)
+
+    async def test_literal_search_ids_requirements_and_bounded_suggestions(self):
+        q=await self.quest(title="100%_repair!",details="Bring stone to the monument")
+        for term in ("%_", "MONUMENT",str(q["id"]),f"#{q['id']}"):
+            self.assertEqual((await store.quest_board(self.guild,10,query=term))["total"],1)
+        for n in range(26):
+            await self.quest(title=f"Quest {n}",request_id=n+2)
+        await store.close_quest(self.guild,900,q["id"],admin=True)
+        suggestions=await store.quest_suggestions(self.guild,"")
+        self.assertEqual(len(suggestions),25)
+        self.assertTrue(all(r["status"]=="open" for r in suggestions))
+        self.assertEqual((await store.quest_suggestions(self.guild,"%_"))[0]["status"],"closed")
+        self.assertEqual(await store.quest_suggestions(self.guild+1,""),[])
+        with self.assertRaises(ValueError):
+            await store.quest_board(self.guild,10,query="x"*81)
+
+
+class QuestBrowserSQLite(QueryContract,unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        temp=tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.enterContext(patch.object(db,"IS_POSTGRES",False))
+        self.enterContext(patch.object(db,"DB_PATH",str(Path(temp.name)/"test.db")))
+        self.guild=100
+        await db.init_db()
+
+    async def panel(self,i=None,**target):
+        embed,view=await browser.render(i or interaction(),**target)
+        self.addCleanup(view.stop)
+        return embed,view
+
+    def edited(self,i):
+        payload=i.edit_original_response.await_args.kwargs
+        if payload.get("view"):
+            self.addCleanup(payload["view"].stop)
+        return payload
+
+    async def test_select_details_back_pagination_and_filter_preserve_context(self):
+        for n in range(12):
+            await self.quest(title=f"Road {n}",request_id=n+1)
+        i=interaction()
+        _,view=await self.panel(i,page=2,query="Road",unrewarded=True)
+        self.assertFalse(view.previous.disabled)
+        self.assertTrue(view.next_page.disabled)
+        select=next(c for c in view.children if isinstance(c,browser.QuestSelect))
+        select._values=[select.options[0].value]
+        await select.callback(i)
+        payload=self.edited(i)
+        self.assertTrue(view.is_finished())
+        self.assertEqual(payload["embed"].description,"Northern road repairs")
+        detail=payload["view"]
+        self.assertEqual((detail.page,detail.query,detail.unrewarded),(2,"Road",True))
+        await detail.back.callback(i)
+        listed=self.edited(i)["view"]
+        self.assertEqual((listed.page,listed.query,listed.unrewarded),(2,"Road",True))
+        await listed.previous.callback(i)
+        page_one=self.edited(i)["view"]
+        self.assertTrue(page_one.previous.disabled)
+        self.assertFalse(page_one.next_page.disabled)
+        filters=next(c for c in page_one.children if isinstance(c,browser.FilterSelect))
+        filters._values=["all"]
+        await filters.callback(i)
+        self.assertFalse(self.edited(i)["view"].unrewarded)
+        self.assertEqual((await store.profile(self.guild,10))["total"],0)
+
+    async def test_refresh_reads_closed_and_changed_reward_status(self):
+        q=await self.quest()
+        i=interaction()
+        _,view=await self.panel(i,quest_id=q["id"])
+        award=await store.complete_quest(self.guild,900,q["id"],10,"Done",admin=True,request_id=2)
+        await store.void_award(self.guild,900,award["id"],"Correction",admin=True)
+        await store.close_quest(self.guild,900,q["id"],admin=True)
+        await view.refresh.callback(i)
+        payload=self.edited(i)
+        self.assertEqual(payload["embed"].fields[0].value,"Closed")
+        self.assertIn("voided",str(payload["embed"].to_dict()))
+        await payload["view"].back.callback(i)
+        self.assertIn("No open quests",self.edited(i)["embed"].description)
+
+    async def test_reader_guild_channel_boundaries_expiry_and_stale_clicks(self):
+        await self.quest()
+        i=interaction()
+        _,view=await self.panel(i)
+        for outsider in (interaction(user=11),interaction(guild=101),interaction(channel=51)):
+            await view.refresh.callback(outsider)
+            outsider.edit_original_response.assert_not_awaited()
+            self.assertTrue(outsider.response.send_message.await_args.kwargs["ephemeral"])
+        await view.on_timeout()
+        self.assertTrue(all(c.disabled for c in view.children))
+        i.edit_original_response.reset_mock()
+        await view.refresh.callback(i)
+        i.edit_original_response.assert_not_awaited()
+
+    async def test_concurrent_clicks_cannot_overwrite_the_new_panel(self):
+        await self.quest()
+        i=interaction()
+        _,view=await self.panel(i)
+        entered,release=asyncio.Event(),asyncio.Event()
+        async def defer():
+            entered.set()
+            await release.wait()
+        i.response.defer.side_effect=defer
+        first=asyncio.create_task(view.navigate(i))
+        await entered.wait()
+        second=interaction()
+        await view.navigate(second)
+        second.edit_original_response.assert_not_awaited()
+        release.set()
+        await first
+        i.edit_original_response.assert_awaited_once()
+        self.edited(i)
+
+    async def test_failures_clear_controls_and_do_not_expose_diagnostics(self):
+        q=await self.quest()
+        i=interaction()
+        _,view=await self.panel(i)
+        with patch.object(store,"quest_board",side_effect=RuntimeError("private diagnostic")):
+            await view.refresh.callback(i)
+            payload=self.edited(i)
+            self.assertEqual(payload["content"],browser.TEMPORARY)
+            self.assertIsNone(payload["view"])
+            self.assertIsNone(payload["embed"])
+            await browser.open_board(i)
+            self.assertEqual(i.followup.send.await_args.args,(browser.TEMPORARY,))
+        _,view=await self.panel(i)
+        await view.navigate(i,quest_id=q["id"]+9999)
+        self.assertEqual(self.edited(i)["content"],browser.UNAVAILABLE)
+        with patch.object(store,"quest_suggestions",side_effect=RuntimeError("private diagnostic")):
+            self.assertEqual(await browser.choices(i,""),[])
+
+    async def test_commands_are_private_autocomplete_accepts_titles_and_old_ids(self):
+        q=await self.quest()
+        i=interaction()
+        cog=QuestCog()
+        await cog.interaction_check(i)
+        i.response.defer.assert_awaited_once_with(ephemeral=True)
+        await cog.quest_list.callback(cog,i,query="repair")
+        self.addCleanup(i.followup.send.await_args.kwargs["view"].stop)
+        self.assertTrue(i.followup.send.await_args.kwargs["ephemeral"])
+        self.assertEqual(i.followup.send.await_args.kwargs["allowed_mentions"].to_dict(),discord.AllowedMentions.none().to_dict())
+        choices=await cog.show_choices(i,"repair")
+        self.assertEqual(choices[0].value,str(q["id"]))
+        self.assertIn(q["title"],choices[0].name)
+        self.assertEqual(await browser.choices(interaction(guild=None),""),[])
+        for value in (str(q["id"]),q["id"],f"#{q['id']}"):
+            await cog.show.callback(cog,i,value)
+            self.addCleanup(i.followup.send.await_args.kwargs["view"].stop)
+            self.assertIn(str(q["id"]),i.followup.send.await_args.kwargs["embed"].title)
+        await cog.show.callback(cog,i,"unselected title")
+        self.assertIn("Choose a suggested quest",i.followup.send.await_args.kwargs["content"])
+        self.assertEqual(cog.show.to_dict(cog.__cog_app_commands_group__)["options"][0]["type"],3)
+
+    async def test_unicode_and_escaped_text_fit_all_discord_limits(self):
+        for n in range(10):
+            await self.quest(title=("😀" if n%2 else "*")*80,details="*"*700,request_id=n+1)
+        embed,view=await self.panel()
+        for embed in (embed,(await self.panel(quest_id=(await store.quests(self.guild))[0]["id"]))[0]):
+            self.assertLessEqual(len(embed.description.encode("utf-16-le"))//2,4096)
+            self.assertLessEqual(len(embed),6000)
+            self.assertLessEqual(len(embed.title.encode("utf-16-le"))//2,256)
+        select=next(c for c in view.children if isinstance(c,browser.QuestSelect))
+        self.assertEqual(len(select.options),10)
+        for option in select.options:
+            self.assertLessEqual(len(option.label.encode("utf-16-le"))//2,100)
+        for choice in await browser.choices(interaction(),""):
+            self.assertLessEqual(len(choice.name.encode("utf-16-le"))//2,100)
+
+
+@unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"),"needs disposable PostgreSQL")
+class QuestBrowserPostgres(QueryContract,unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.enterContext(patch.object(db,"IS_POSTGRES",True))
+        self.enterContext(patch.object(db,"DATABASE_URL",os.environ["TEST_DATABASE_URL"]))
+        self.enterContext(patch.object(db,"_pool",None))
+        self.enterContext(patch.object(db,"_pool_lock",asyncio.Lock()))
+        self.guild=uuid4().int>>66
+        await db.init_db()
+        self.addAsyncCleanup(db._pool.close)
