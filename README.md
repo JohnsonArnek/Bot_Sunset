@@ -23,6 +23,8 @@ retroactively and no opening funds are invented.
 
 | Command | Access and effect |
 | --- | --- |
+| `/bank public` | Anyone can post this week's banner account and the central treasury balance in the channel |
+| `/bank public period:all` | Show accumulated sales since the opening week and today's outstanding liability |
 | `/bank balance` | Read your personal balance |
 | `/bank balance land_name:Coppercross` | Owners/officers read their settlement; administrators may read any |
 | `/bank statement` | Read dated entries, authorising user, reasons and running balances; same account selectors as balance |
@@ -34,7 +36,7 @@ retroactively and no opening funds are invented.
 Use one account selector at a time: `member`, `land_name`, or administrator-only
 `account_id`. Deposits and withdrawals require an explicit target and reason.
 Discord Administrator permission is required; the configured staff role, Hands,
-Tribunes and land officers cannot adjust balances. All bank replies are private.
+Tribunes and land officers cannot adjust balances. Personal and settlement balances, statements, and administrator replies are private.
 Deposits/withdrawals record an administrator's decision and do not move Minecraft
 items. The application preserves journal entries; correct mistakes with a new
 authorised adjustment explaining the original transaction.
@@ -47,7 +49,7 @@ price is the approved quantity multiplied by the per-block tier price at checkou
 and settlement balance after payment. A free purchase needs no funds.
 
 Omit `payment`, or choose `manual`, to retain the manual-payment workflow with no
-bank debit. Reserve, leftover, rotation and auction purchases remain manual.
+bank debit. Reserve and leftover checkouts also offer bank transfer. Rotation and auction purchases use manual payment.
 Personal funds are never used automatically for land purchases. A shortage or
 database error leaves balances, approvals, purchases, chunks and the delivery
 ledger unchanged. Retries of the same interaction return its original receipt.
@@ -67,15 +69,47 @@ Administrator adjustments accept 1–1,000,000,000 ems per entry; balances are c
 at 1,000,000,000,000 ems, and claim receipts at 2,000,000,000 ems. No new environment
 variables are needed.
 
-## Claim banner creation
+## Public banner account
 
-Every new normal `/claim buy` records a creation liability for each approved
-block, separately from its purchase payment and delivery. The default cost is
-**37 ems per banner**. The land's share is its checkout price capped at the
-creation cost; the central budget owes the remainder. At a 7-ems claim price,
-one banner creates a 7-ems land liability and a 30-ems central subsidy. A land
-shortage never increases that subsidy. Above-cost sale proceeds remain in the
-treasury after creation (a 50-ems bank purchase leaves 13 after a 37-ems creation).
+By default each server books **7 banners every Monday UTC**. Unsold banners
+carry forward, and the bot catches up missed weeks after a restart. At the default creation cost of
+37 emeralds, seven unsold banners represent a **259-emerald liability**. An approved
+purchase of two clears 74 emeralds of that liability and leaves five banners worth 185.
+Approvals and delivery entries do not count as sales. The existing
+`weekly_blocks` setting changes the quantity starting the following Monday.
+
+| Sale at default cost | Sale price | Result per banner |
+| --- | ---: | ---: |
+| Full price | 37 | 0 |
+| Reduced tier, for example | 7 | −30 |
+| Free or strategic | 0 | −37 |
+| Reserve, at 1.5× full price rounded up | 56 | +19 |
+
+`/bank public` includes claim checkouts, accepted rotations, winning auctions
+at their actual bids, and strategic grants. It totals sale prices, costs and the
+result when a sale completes. The bank balance shows actual journal entries.
+Manual sales are reported at the agreed price. The report shows bank payments
+at checkout separately. Only aggregate figures appear in the channel.
+
+Accounting opens in the deployment week and incorporates that week's recorded
+sales at their original prices and quantities. Earlier weeks are outside the
+statement. Older normal receipts supply their saved cost. Opening-week sales
+without a cost snapshot use the opening creation cost. Eligible sales from
+pre-existing reserves or extra allocations can exceed the estimate. They earn
+their actual margin and release only the stock on the books. They never consume
+next week's production in advance.
+
+`/banner cost` controls both creation cost and full sale price, replacing the
+separate historical full-price setting. The public account estimates unsold
+liability at the current rate. Sold banners keep their original prices and costs.
+
+## Settling creation costs
+
+Each new normal, leftover or reserve checkout opens a funding record. For a
+7-emerald sale the land owes 7 and the central budget covers 30. The split stays
+fixed if the land is short. An administrator confirms that funds were spent
+through the existing banner tracker. This cash settlement does not release the
+weekly liability a second time.
 
 | Command | Purpose |
 | --- | --- |
@@ -84,7 +118,7 @@ treasury after creation (a 50-ems bank purchase leaves 13 after a 37-ems creatio
 | `/banner show purchase_id:123` | Fixed cost split and recent creation records for a purchase receipt |
 | `/banner create purchase_id:123 blocks:1 reason:Crafted` | Administrator records actual creation and debits bank funds |
 | `/banner create purchase_id:123 blocks:1 reason:Cash received and spent land_payment:physical` | Administrator confirms physical payment of the unpaid land share; treasury funds only its fixed subsidy |
-| `/banner cost amount:37` | Administrator changes the cost for future purchases; omit amount to read it |
+| `/banner cost amount:37` | Administrator sets the creation cost and full sale price. Omit the amount to read it |
 
 All banner replies are private. The creation step accepts partial batches,
 rejects quantities already created, and records who acted, when and why. It
@@ -92,8 +126,10 @@ destroys the recorded cost rather than transferring it to another bank account.
 For manual claims, the default creation step debits the land share from its bank
 account and the subsidy from the treasury. Physical-payment confirmation is an
 explicit administrator assertion that the land contribution was received and
-spent outside the bank; it creates no extra credit. Never also deposit those same
-spent emeralds as new bank funds.
+spent outside the bank. On a manual reserve sale the land pays the full price
+and the premium is credited to treasury. The default sale of 56 burns 37 and
+credits 19. Physical confirmation means the full payment was received, including
+the premium. Never also deposit those same emeralds as new bank funds.
 
 Bank-paid claims have already transferred the land contribution into the
 treasury. Creation spends that contribution there, together with the subsidy,
@@ -108,8 +144,8 @@ rewrite them. Creation records and obligations survive land deletion.
 
 Creation is an administrator action. `/ledger deliver` still only records
 delivery and cannot spend money or clear creation liabilities. The tracker covers
-new normal purchases after deployment; it does not infer historical creation or
-backfill reserve, leftover, auction, rotation or manual ledger allocations.
+normal, reserve and leftover checkouts made with this release. The public statement
+also includes rotation, auction and strategic allocations at their recorded prices.
 Private tables use the RLS-enabled `sunset_banners` schema alongside the bank.
 
 ## Public settlement libraries

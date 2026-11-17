@@ -1,4 +1,6 @@
 import asyncio
+import json
+from datetime import timedelta
 import os
 import tempfile
 import unittest
@@ -9,6 +11,8 @@ from uuid import uuid4
 import database as db
 import bank_store as bank
 import banner_store as banners
+import banner_account as public
+from cogs.bank import BankCog
 from cogs.banners import BannerCog
 from test_bank import AT, BankContract, interaction
 
@@ -35,10 +39,114 @@ class BannerContract:
     async def totals(self):
         return (await banners.status(self.guild,900,admin=True))["totals"]
 
+    async def test_public_price_results_stock_and_cash(self):
+        opening = await public.statement(self.guild)
+        self.assertEqual((opening["produced"], opening["unsold"], opening["liability"]), (7, 7, 259))
+        land, reduced = await self.purchase(blocks=2, payment="bank", funds=14)
+        await bank.buy_claim(self.guild,10,request_id=2,payment="bank")
+        large = await self.land(owner=20, chunks=26, name="Large Keep")
+        await self.approval(large)
+        full = await bank.buy_claim(self.guild,20,request_id=3)
+        await db.update_reserve_blocks(self.guild,4)
+        reserve = await bank.buy_claim(self.guild,10,request_id=4,kind="reserve")
+        self.assertEqual([r["sale_result"] for r in (full,reduced,reserve)], [0,-60,19])
+        self.assertEqual(reduced["released_blocks"]*reduced["banner"]["unit_cost"],74)
+        r = await public.statement(self.guild)
+        self.assertEqual((r["unsold"],r["liability"],r["treasury"]),(3,111,14))
+        self.assertEqual(r["position"],-152)
+        self.assertEqual(r["sales"]["reduced"]["transferred"],14)
+        self.assertEqual(r["sales"]["reserve"]["transferred"],0)
+        receipt = await self.create(reserve,land_payment="physical")
+        self.assertEqual((receipt["physical"], receipt["treasury_debit"]), (56,-19))
+        self.assertTrue((await self.create(reserve,land_payment="physical"))["duplicate"])
+        after = await public.statement(self.guild)
+        self.assertEqual((after["liability"],after["treasury"],after["sales"]),(111,33,r["sales"]))
+        self.assertEqual((await public.statement(self.guild+1))["liability"],259)
+
+    async def test_reserve_bank_sale_and_unfunded_attempt(self):
+        await self.land(chunks=0)
+        await db.update_reserve_blocks(self.guild,4)
+        with self.assertRaisesRegex(ValueError,"Insufficient"):
+            await bank.buy_claim(self.guild,10,request_id=2,kind="reserve",payment="bank")
+        self.assertEqual((await public.statement(self.guild))["unsold"],7)
+        await self.deposit(56,land_name="Test Keep")
+        r = await bank.buy_claim(self.guild,10,request_id=2,kind="reserve",payment="bank")
+        await self.create(r)
+        self.assertEqual(await self.balance(treasury=True),19)
+        self.assertEqual((await public.statement(self.guild))["sales"]["reserve"]["transferred"],56)
+
+    async def test_manual_reserve_collects_full_price_from_land_at_settlement(self):
+        await self.land(chunks=0)
+        await db.update_reserve_blocks(self.guild,4)
+        await self.deposit(37,land_name="Test Keep")
+        r = await bank.buy_claim(self.guild,10,request_id=2,kind="reserve")
+        self.assertEqual((await self.totals())["premium_due"],19)
+        with self.assertRaisesRegex(ValueError,"Land needs 56"):
+            await self.create(r)
+        await self.deposit(19,request_id=3,land_name="Test Keep")
+        settled = await self.create(r)
+        self.assertEqual((settled["land_debit"],settled["treasury_debit"]),(56,-19))
+        self.assertEqual((await self.balance(treasury=True),await self.balance(land_name="Test Keep")),(19,0))
+        self.assertEqual((await self.totals())["premium_due"],0)
+
+    async def test_production_carry_and_sales_beyond_the_weekly_allowance(self):
+        await self.purchase(blocks=9,chunks=26)
+        await public.set_weekly_production(self.guild,3)
+        opening = await public.statement(self.guild)
+        self.assertEqual((opening["unsold"], opening["sales"]["full"]["released"]), (0,7))
+        with patch.object(bank,"now",return_value=AT+timedelta(weeks=2)):
+            await asyncio.gather(public.weekly_production(self.guild), public.weekly_production(self.guild))
+            week = await public.statement(self.guild)
+            lifetime = await public.statement(self.guild,all_time=True)
+            self.assertEqual((week["produced"],week["sales"],week["unsold"]),(3,{},6))
+            self.assertEqual((lifetime["produced"],lifetime["sales"]["full"]["sold"]),(13,9))
+            await banners.cost(self.guild,admin=True,amount=50)
+            r = await public.statement(self.guild,all_time=True)
+            self.assertEqual((r["liability"],r["sales"]["full"]["cost"]),(300,333))
+
+    async def test_opening_week_imports_actual_old_prices_without_recharging(self):
+        land = await self.land()
+        previous = dict(kind="normal", payment="manual", total=100, blocks=2, banner=dict(unit_cost=37))
+        async with db.DBConnection() as conn:
+            await conn.execute(f"INSERT INTO {bank.table('operations')} (guild_id,request_id,actor_id,action,reason,created_at,receipt) "
+                               "VALUES (?,?,?,'claim-normal','legacy',?,?)", (self.guild,1,10,AT.isoformat(),json.dumps(previous)))
+            for at in (AT,AT-timedelta(weeks=1)):
+                await conn.execute("INSERT INTO purchases (land_id,type,price_paid,purchased_at) VALUES (?,'rotation',7,?)",
+                                   (land["id"],at.isoformat()))
+        await db.record_purchase(land["id"],"strategic",0)
+        report = await public.statement(self.guild)
+        self.assertEqual((report["unsold"], report["treasury"]), (3,0))
+        self.assertEqual(report["sales"]["other"]["revenue"],100)
+        self.assertEqual((report["sales"]["reduced"]["sold"],report["sales"]["reduced"]["revenue"]), (2,7))
+        self.assertEqual((await self.totals())["pending"],0)
+
+    async def test_rotation_auction_and_strategic_grants_book_each_allocation_once(self):
+        land = await self.land()
+        land_id = land["id"]
+        offer = await db.create_rotation_offer(self.guild,land_id)
+        with patch.object(public,"record_sale",side_effect=RuntimeError("failed journal")), self.assertRaises(RuntimeError):
+            await public.accept_rotation(self.guild,offer,land_id,2,7,37,900)
+        self.assertEqual((await self.state(land))["chunks"],3)
+        self.assertEqual(await public.accept_rotation(self.guild,offer,land_id,2,7,37,900),5)
+        with self.assertRaises(ValueError):
+            await public.accept_rotation(self.guild,offer,land_id,2,7,37,900)
+        await db.update_reserve_blocks(self.guild,5)
+        await public.strategic_grant(self.guild,land_id,900,77)
+        with self.assertRaises(ValueError):
+            await public.strategic_grant(self.guild,land_id,900,77)
+        auction = await db.create_auction(self.guild,2,AT.isoformat(),AT.isoformat())
+        await db.place_auction_bid(auction,land_id,60)
+        await public.settle_auction(self.guild,auction,900)
+        self.assertIsNone(await public.settle_auction(self.guild,auction,900))
+        r = await public.statement(self.guild)
+        self.assertEqual((r["unsold"],r["sales"]["reserve"]["revenue"],r["sales"]["reduced"]["sold"]),(3,60,3))
+        self.assertEqual((await db.get_reserve(self.guild))["total_blocks"],3)
+        self.assertEqual(await self.state(land),dict(chunks=7,purchases=4,deliveries=2))
+
     async def test_fixed_split_and_insufficient_land_never_increases_subsidy(self):
         land,r = await self.purchase()
         await self.deposit(100,request_id=3,treasury=True)
-        self.assertEqual(await self.totals(),dict(pending=1,total=37,land_share=7,central_share=30,prepaid=0,destroyed=0))
+        self.assertEqual(await self.totals(),dict(pending=1,total=37,land_share=7,central_share=30,prepaid=0,destroyed=0,premium_due=0))
         with self.assertRaisesRegex(ValueError,"Land needs 7"):
             await self.create(r)
         self.assertEqual(await self.balance(treasury=True),100)
@@ -97,7 +205,7 @@ class BannerContract:
         self.assertEqual((await self.totals())["destroyed"],111)
         self.assertEqual(await self.balance(treasury=True),0)
 
-    async def test_free_land_and_excess_sale_price_keep_total_cost_at_37(self):
+    async def test_free_land_subsidy_and_full_price_sale_at_cost(self):
         _,r=await self.purchase(chunks=0)
         self.assertEqual((r["banner"]["land_unit"],(await self.totals())["central_share"]),(0,37))
         await self.deposit(37,request_id=3,treasury=True)
@@ -108,7 +216,8 @@ class BannerContract:
         r=await bank.buy_claim(self.guild,20,request_id=5,payment="bank")
         made=await self.create(r,request_id=11)
         self.assertEqual((made["central_share"],made["land_share"]),(0,37))
-        self.assertEqual(await self.balance(treasury=True),13)
+        self.assertEqual(await self.balance(treasury=True),0)
+        self.assertEqual(await self.balance(land_name="Large Keep"),13)
 
     async def test_cost_snapshots_permissions_guild_isolation_and_archived_land(self):
         land,r=await self.purchase()
@@ -178,6 +287,20 @@ class BannerSQLite(BannerContract,unittest.IsolatedAsyncioTestCase):
         self.assertIn("Only Discord administrators",i.followup.send.await_args.kwargs["content"])
         self.assertEqual((await self.totals())["pending"],1)
 
+    async def test_public_command_publishes_only_aggregate_figures(self):
+        await self.purchase(payment="bank", funds=20)
+        cog, i = BankCog(), interaction(self.guild)
+        i.command = cog.public_account
+        await cog.interaction_check(i)
+        await cog.public_account.callback(cog,i)
+        i.response.defer.assert_awaited_once_with(ephemeral=False)
+        reply = i.followup.send.await_args.kwargs
+        self.assertFalse(reply["ephemeral"])
+        contents = str(reply["embed"].to_dict())
+        self.assertIn("222 ems liability", contents)
+        self.assertNotIn("Test Keep", contents)
+        self.assertNotIn("Counted deposit", contents)
+
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"),"needs disposable PostgreSQL")
 class BannerPostgres(BannerContract,unittest.IsolatedAsyncioTestCase):
@@ -196,4 +319,4 @@ class BannerPostgres(BannerContract,unittest.IsolatedAsyncioTestCase):
             row=await conn.fetchone("SELECT bool_and(relrowsecurity) AS rls,count(*) AS tables,"
                 "has_schema_privilege('public','sunset_banners','USAGE') AS public_access "
                 "FROM pg_class WHERE relnamespace='sunset_banners'::regnamespace AND relkind='r'")
-        self.assertEqual(row,dict(rls=True,tables=2,public_access=False))
+        self.assertEqual(row,dict(rls=True,tables=4,public_access=False))

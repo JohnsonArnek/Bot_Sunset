@@ -18,6 +18,7 @@ import discord
 from discord.ext import commands, tasks
 
 import database as db
+import banner_account
 import models
 
 log = logging.getLogger("claims-bot")
@@ -26,6 +27,7 @@ log = logging.getLogger("claims-bot")
 class DistributionCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.accounting_weeks = {}
 
     async def cog_load(self):
         self.distribution_loop.start()
@@ -37,12 +39,16 @@ class DistributionCog(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def distribution_loop(self):
-        try:
-            for guild in self.bot.guilds:
+        for guild in self.bot.guilds:
+            try:
+                week = banner_account.week_of(datetime.now(timezone.utc))
+                if self.accounting_weeks.get(guild.id) != week:
+                    await banner_account.weekly_production(guild.id)
+                    self.accounting_weeks[guild.id] = week
                 if await self._should_run(guild.id):
                     await self._run_distribution(guild)
-        except Exception as e:
-            log.error(f"Distribution loop error: {e}", exc_info=True)
+            except Exception:
+                log.exception("Weekly distribution failed for guild %s", guild.id)
 
     @distribution_loop.before_loop
     async def before_distribution_loop(self):
@@ -95,7 +101,7 @@ class DistributionCog(commands.Cog):
         expired_count = await self._expire_old_approvals(guild)
 
         # Step 2: Generate weekly blocks
-        weekly_blocks = int(await db.get_config(guild_id, "weekly_blocks") or "7")
+        weekly_blocks = await banner_account.weekly_production(guild_id)
         remaining = weekly_blocks
 
         # Step 3: Handle reserve allocation mode (topup vs fixed)

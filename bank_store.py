@@ -190,8 +190,9 @@ async def adjust(guild, actor, amount, reason, *, admin, request_id, withdraw=Fa
 
 async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"):
     import banner_store
-    if kind not in ("normal", "reserve", "leftover") or payment not in ("manual", "bank") or (payment == "bank" and kind != "normal"):
-        raise ValueError("Bank transfer is available for /claim buy. Other claim purchases use manual payment.")
+    import banner_account
+    if kind not in ("normal", "reserve", "leftover") or payment not in ("manual", "bank"):
+        raise ValueError("Choose a claim type and either manual payment or bank transfer.")
     async with write(guild) as conn:
         prior = await _replay(conn, guild, actor, request_id, f"claim-{kind}")
         if prior:
@@ -223,23 +224,18 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
             available = reserve["leftover_blocks"] if kind == "leftover" else reserve["total_blocks"] - reserve["protected_min"]
             if available < 1:
                 raise ValueError("No blocks are available in that pool (protected reserves are not for sale).")
-        config = await conn.fetchone("SELECT value FROM config WHERE guild_id=? AND key='full_block_cost'", (guild,))
-        try:
-            full_price = int(config["value"] if config else db.DEFAULT_CONFIG["full_block_cost"])
-        except (ValueError, TypeError):
-            raise ValueError("Ask an administrator to correct the full_block_cost setting.") from None
-        if not 0 <= full_price <= MAX_AMOUNT or not 1 <= blocks <= 2_000_000_000 or not 0 <= land["chunks"] <= 2_000_000_000 - blocks:
+        full_price = await banner_store.unit_cost(conn, guild)
+        if not 1 <= blocks <= 2_000_000_000 or not 0 <= land["chunks"] <= 2_000_000_000 - blocks:
             raise ValueError("The configured price or recorded chunk count is invalid; ask an administrator to review it.")
-        unit = models.reserve_price(land["chunks"], full_price) if kind == "reserve" else models.block_price(land["chunks"], full_price)
+        unit = models.reserve_price(full_price) if kind == "reserve" else models.block_price(land["chunks"], full_price)
         total = unit * blocks
         if total > 2_000_000_000:
             raise ValueError("This purchase exceeds the supported transaction amount.")
-        banner = None
-        if kind == "normal":
-            creation_cost = await banner_store.unit_cost(conn, guild)
-            land_unit = min(unit, creation_cost)
-            banner = dict(unit_cost=creation_cost, land_unit=land_unit,
-                          prepaid_unit=land_unit if payment == "bank" else 0)
+        week = await banner_account.ensure_week(conn, guild, at)
+        released = min(blocks, await banner_account.remaining(conn, guild))
+        land_unit = min(unit, full_price)
+        banner = dict(unit_cost=full_price, land_unit=land_unit,
+                      prepaid_unit=land_unit if payment == "bank" else 0)
         entries, after = [], None
         if payment == "bank":
             payer = await _account(conn, guild, "land", land["id"], land["name"])
@@ -265,10 +261,10 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
         await conn.execute("INSERT INTO block_ledger (land_id,guild_id,type,blocks,note,recorded_by,created_at) VALUES (?,?,'owed',?,?,?,?)",
                            (land["id"], guild, blocks, note, actor, at.isoformat()))
         receipt = dict(land_id=land["id"], land_name=land["name"], blocks=blocks, chunks=land["chunks"] + blocks,
-                       unit_price=unit, total=total, payment=payment, balance=after, kind=kind)
-        if banner:
-            receipt["banner"] = banner
+                       unit_price=unit, total=total, payment=payment, balance=after, kind=kind, banner=banner,
+                       sale_result=total-blocks*full_price, released_blocks=released)
         result = await _record(conn, guild, actor, request_id, f"claim-{kind}", note, receipt, entries)
-        if banner:
-            await banner_store.record_batch(conn, guild, result)
+        await banner_account.record_sale(conn, guild, week, "checkout", result["operation_id"], kind,
+                                         blocks, full_price, total, payment, released=released)
+        await banner_store.record_batch(conn, guild, result)
         return result

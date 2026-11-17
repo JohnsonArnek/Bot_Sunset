@@ -3,7 +3,6 @@ Pure-logic functions for pricing, queue scoring, and reserve pricing.
 No I/O or database access — these are stateless calculations.
 """
 
-import math
 from datetime import datetime, timezone
 
 
@@ -21,20 +20,20 @@ def block_price(chunks: int, full_block_cost: int) -> int:
     if chunks <= 2:
         return 0
     elif chunks <= 5:
-        return 7
+        return min(7, full_block_cost - 1)
     elif chunks <= 10:
-        return 16
+        return min(16, full_block_cost - 1)
     elif chunks <= 16:
-        return 25
+        return min(25, full_block_cost - 1)
     elif chunks <= 25:
-        return 32
+        return min(32, full_block_cost - 1)
     else:
         return full_block_cost
 
 
-def reserve_price(chunks: int, full_block_cost: int) -> int:
-    """1.5× the normal block price, rounded up."""
-    return math.ceil(block_price(chunks, full_block_cost) * 1.5)
+def reserve_price(full_block_cost: int) -> int:
+    """Reserve purchases pay 1.5 times creation cost, rounded up."""
+    return (3 * full_block_cost + 1) // 2
 
 
 def queue_score(
@@ -78,15 +77,7 @@ def days_in_queue(requested_at_iso: str) -> int:
 def price_tier_label(chunks: int, full_block_cost: int) -> str:
     """Human-readable label for the current price tier."""
     price = block_price(chunks, full_block_cost)
-    if price == 0:
-        return "Free (0-2 chunks)"
-    elif price == 7:
-        return "7 ems (3-5 chunks)"
-    elif price == 16:
-        return "16 ems (6-10 chunks)"
-    elif price == 25:
-        return "25 ems (11-16 chunks)"
-    elif price == 32:
-        return "32 ems (17-25 chunks)"
-    else:
-        return f"{full_block_cost} ems (26+ chunks)"
+    for maximum, label in ((2, "0-2"), (5, "3-5"), (10, "6-10"), (16, "11-16"), (25, "17-25")):
+        if chunks <= maximum:
+            return f"{'Free' if price == 0 else f'{price} ems'} ({label} chunks)"
+    return f"{price} ems (26+ chunks)"

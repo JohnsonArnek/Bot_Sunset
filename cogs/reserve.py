@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
-import models
+import banner_account
 
 
 async def _is_staff(interaction: discord.Interaction) -> bool:
@@ -91,17 +91,11 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         if not land:
             return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
 
-        reserve = await db.get_reserve(interaction.guild_id)
-        available = reserve["total_blocks"] - reserve["protected_min"]
-        if available <= 0:
-            return await interaction.followup.send(
-                f"🚫 No reserve blocks available (protected minimum: {reserve['protected_min']}).",
-                ephemeral=True,
-            )
-
-        new_chunks = await db.add_land_chunks(land["id"], 1)
-        await db.update_reserve_blocks(interaction.guild_id, reserve["total_blocks"] - 1)
-        await db.record_purchase(land["id"], "strategic", 0)
+        try:
+            new_chunks, remaining = await banner_account.strategic_grant(interaction.guild_id, land["id"],
+                                                                        interaction.user.id, interaction.id)
+        except ValueError as exc:
+            return await interaction.followup.send(str(exc), ephemeral=True)
 
         embed = discord.Embed(
             title="🎯 Strategic Block Distributed",
@@ -109,7 +103,7 @@ class ReserveCog(commands.GroupCog, name="reserve"):
         )
         embed.add_field(name="Land", value=land["name"], inline=True)
         embed.add_field(name="New Chunks", value=str(new_chunks), inline=True)
-        embed.add_field(name="Reserve Remaining", value=str(reserve["total_blocks"] - 1), inline=True)
+        embed.add_field(name="Reserve Remaining", value=str(remaining), inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_footer(text=f"Distributed by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)

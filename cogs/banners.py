@@ -17,7 +17,8 @@ def batch_text(row):
             f"{row['created']:,}/{row['blocks']:,} banners created · **{pending:,} pending**\n"
             f"Creation cost: {row['unit_cost']:,} ems/banner · outstanding: **{land+central:,} ems**\n"
             f"Land liability: **{land:,}** ({prepaid:,} prepaid) · central subsidy: **{central:,} ems**\n"
-            f"Bank funding needed: land **{land-prepaid:,}** + treasury **{central+prepaid:,} ems**")
+            f"Creation funding needed: land **{land-prepaid:,}** + treasury **{central+prepaid:,} ems**"
+            + (f"\nReserve premium also due to treasury: **{pending*row['premium_unit']:,} ems**" if row["premium_unit"] else ""))
 
 
 @app_commands.guild_only()
@@ -41,6 +42,8 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
                  f"Land liabilities: **{s['land_share']:,}** · central subsidies: **{s['central_share']:,} ems**\n"
                  f"Already prepaid by bank: {s['prepaid']:,} ems · destroyed through recorded creation: {s['destroyed']:,} ems"]
         lines.extend(batch_text(r) for r in result["batches"])
+        if s["premium_due"]:
+            lines.append(f"Manual reserve premiums due to the treasury: **{s['premium_due']:,} ems**.")
         if not result["batches"]:
             lines.append("No tracked purchases on this page.")
         lines.append("Use /banner show for details. Creation is separate from delivery; /ledger deliver does not spend money.")
@@ -63,7 +66,7 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
     @app_commands.command(description="[Admin] Record banners created and destroy their funded creation cost")
     @app_commands.describe(purchase_id="Purchase receipt ID shown by /claim buy or /banner status",
                            blocks="Number actually created in this batch",reason="Creation record or explanation",
-                           land_payment="Physical confirms the unpaid land share was paid and spent outside the bank")
+                           land_payment="Physical confirms receipt of the full land payment, including any reserve premium")
     @app_commands.choices(land_payment=[app_commands.Choice(name="Debit bank funds (recognises prepaid claims)",value="bank"),
                                        app_commands.Choice(name="Confirm physical land payment",value="physical")])
     async def create(self, interaction: discord.Interaction, purchase_id: AccountID,
@@ -76,7 +79,7 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
         await reply(interaction,f"**{'Already recorded' if r['duplicate'] else 'Creation recorded'} · transaction #{r['operation_id']}**\n"
                     f"Purchase #{r['purchase_id']} · {r['blocks']:,} banners · **{r['total']:,} ems destroyed**\n"
                     f"Cost split: land {r['land_share']:,} + central budget {r['central_share']:,} ems\n"
-                    f"Bank debits: land {r['land_debit']:,} + treasury {r['treasury_debit']:,} ems\n"
+                    f"Bank changes: land {-r['land_debit']:+,} · treasury {-r['treasury_debit']:+,} ems\n"
                     f"Confirmed physical land payment: {r['physical']:,} ems\n"
                     f"{r['remaining']:,} banners still to create. Record delivery separately with /ledger deliver.")
 
@@ -86,7 +89,8 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
             value = await store.cost(interaction.guild_id,admin=interaction.permissions.administrator,amount=amount)
         except ValueError as exc:
             return await reply(interaction,str(exc))
-        await reply(interaction,f"Banner creation cost: **{value:,} ems each**. Existing purchases keep their recorded cost and subsidy split.")
+        await reply(interaction,f"Creation cost and full sale price: **{value:,} ems per banner**. "
+                    "The public account values unsold banners at this rate. Completed sales keep their recorded prices.")
 
 
 async def setup(bot: commands.Bot):

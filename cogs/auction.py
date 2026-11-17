@@ -8,7 +8,8 @@ Reserve blocks above the protected minimum are auctioned during the weekend.
 - Top N highest bids win 1 reserve block each.
 """
 
-import math
+import models
+import banner_account
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -103,30 +104,16 @@ class AuctionCog(commands.GroupCog, name="auction"):
         auction_id = auction["id"]
         blocks_offered = auction["blocks_offered"]
 
-        bids = await db.get_auction_bids(auction_id)
-        await db.close_auction(auction_id)
-
-        log.info(f"=== [{guild.name}] Resolving Auction #{auction_id} ({len(bids)} bid(s), {blocks_offered} block(s) offered) ===")
-
-        winning_bids = bids[:blocks_offered]
+        result = await banner_account.settle_auction(guild_id, auction_id, self.bot.user.id if self.bot.user else None)
+        if result is None:
+            return
+        bid_count, winning_bids = result
         winners_info = []
 
         for bid in winning_bids:
-            land_id = bid["land_id"]
             land_name = bid["land_name"]
             owner_id = bid["owner_id"]
             amount = bid["bid_amount"]
-
-            # Give land +1 chunk and deduct 1 from reserve pool
-            await db.add_land_chunks(land_id, 1)
-            await db.add_reserve_blocks(guild_id, -1)
-            await db.record_purchase(land_id, "auction", amount)
-            await db.add_ledger_owed(
-                land_id, guild_id,
-                blocks=1,
-                note=f"Auction win (bid {amount} ems)",
-                recorded_by=self.bot.user.id if self.bot.user else None,
-            )
 
             winners_info.append(f"🏰 **{land_name}** (<@{owner_id}>) — **{amount} ems** (+1 chunk)")
 
@@ -148,13 +135,13 @@ class AuctionCog(commands.GroupCog, name="auction"):
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="📦 Blocks Offered", value=str(blocks_offered), inline=True)
-        embed.add_field(name="🙋 Total Bids", value=str(len(bids)), inline=True)
+        embed.add_field(name="🙋 Total Bids", value=str(bid_count), inline=True)
         embed.add_field(name="🏆 Winning Bids", value=str(len(winning_bids)), inline=True)
 
         if winners_info:
             embed.add_field(name="🎉 Winners", value="\n".join(winners_info), inline=False)
         else:
-            embed.add_field(name="🎉 Winners", value="No bids were placed this weekend.", inline=False)
+            embed.add_field(name="🎉 Winners", value="No reserve blocks were awarded.", inline=False)
 
         embed.set_footer(text=f"Auction #{auction_id} resolved for {guild.name}")
 
@@ -168,7 +155,7 @@ class AuctionCog(commands.GroupCog, name="auction"):
 
     async def _announce_auction_start(self, guild: discord.Guild, blocks: int, end_time: datetime):
         full_cost = await db.get_full_block_cost(guild.id)
-        start_price = math.ceil(full_cost * 1.5)
+        start_price = models.reserve_price(full_cost)
 
         embed = discord.Embed(
             title="🔨 Weekend Reserve Block Auction Live!",
@@ -209,7 +196,7 @@ class AuctionCog(commands.GroupCog, name="auction"):
 
         bids = await db.get_auction_bids(active["id"])
         full_cost = await db.get_full_block_cost(interaction.guild_id)
-        start_price = math.ceil(full_cost * 1.5)
+        start_price = models.reserve_price(full_cost)
         ends_dt = datetime.fromisoformat(active["ends_at"]).replace(tzinfo=timezone.utc)
 
         embed = discord.Embed(
@@ -251,7 +238,7 @@ class AuctionCog(commands.GroupCog, name="auction"):
             return await interaction.followup.send("❌ You are not the owner of this land.", ephemeral=True)
 
         full_cost = await db.get_full_block_cost(interaction.guild_id)
-        min_bid = math.ceil(full_cost * 1.5)
+        min_bid = models.reserve_price(full_cost)
 
         if amount < min_bid:
             return await interaction.followup.send(

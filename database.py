@@ -19,7 +19,7 @@ IS_POSTGRES = DATABASE_URL is not None and (DATABASE_URL.startswith("postgres://
 DB_PATH = "claims.db"
 
 DEFAULT_CONFIG = {
-    "full_block_cost": "50",
+    "banner_creation_cost": "37",
     "staff_role_id": "0",
     "weekly_reset_day": "0",
     "weekly_blocks": "7",
@@ -483,6 +483,8 @@ async def init_db():
 # ── Config helpers ────────────────────────────────────────────────────
 
 async def get_config(guild_id: int, key: str) -> str:
+    if key == "full_block_cost":
+        key = "banner_creation_cost"
     async with DBConnection() as conn:
         row = await conn.fetchone(
             "SELECT value FROM config WHERE guild_id = ? AND key = ?",
@@ -494,6 +496,8 @@ async def get_config(guild_id: int, key: str) -> str:
 
 
 async def set_config(guild_id: int, key: str, value: str):
+    if key == "full_block_cost":
+        key = "banner_creation_cost"
     async with DBConnection() as conn:
         if IS_POSTGRES:
             await conn.execute(
@@ -510,8 +514,9 @@ async def set_config(guild_id: int, key: str, value: str):
 
 
 async def get_full_block_cost(guild_id: int) -> int:
-    val = await get_config(guild_id, "full_block_cost")
-    return int(val) if val else 50
+    from banner_store import unit_cost
+    async with DBConnection() as conn:
+        return await unit_cost(conn, guild_id)
 
 
 async def get_staff_role_id(guild_id: int) -> int:
@@ -787,12 +792,15 @@ async def get_expired_approved_requests(guild_id: int, days: int = 7) -> list[di
 # ── Purchase helpers ──────────────────────────────────────────────────
 
 async def record_purchase(land_id: int, purchase_type: str, price_paid: int):
-    now = datetime.now(timezone.utc).isoformat()
+    from banner_account import record_allocation_sale
+    import bank_store
     async with DBConnection() as conn:
-        await conn.execute(
-            "INSERT INTO purchases (land_id, type, price_paid, purchased_at) VALUES (?, ?, ?, ?)",
-            (land_id, purchase_type, price_paid, now),
-        )
+        land = await conn.fetchone("SELECT guild_id FROM lands WHERE id=?", (land_id,))
+    if not land:
+        raise ValueError("This settlement no longer exists.")
+    guild = land["guild_id"]
+    async with bank_store.write(guild) as conn:
+        await record_allocation_sale(conn, guild, land_id, purchase_type, price_paid, 1, bank_store.now())
 
 
 async def get_normal_purchase_this_week(land_id: int) -> dict | None:
