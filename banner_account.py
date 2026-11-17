@@ -42,6 +42,8 @@ async def import_opening_sales(conn, guild, week, cost):
     sales = []
     for row in checkouts:
         receipt = json.loads(row["receipt"])
+        if receipt["kind"] in ("auction", "rotation"):
+            continue  # Their original purchase rows are included below.
         sales.append((row["created_at"], "checkout", row["id"], receipt["kind"], receipt["blocks"],
                       receipt.get("banner", {}).get("unit_cost", cost), receipt["total"], receipt["payment"]))
     allocations = await conn.fetchall(
@@ -89,7 +91,7 @@ async def weekly_production(guild):
         return row["produced"]
 
 
-async def record_allocation_sale(conn, guild, land_id, kind, price, blocks, at, *, grant_id=None, cost=None):
+async def record_allocation_sale(conn, guild, land_id, kind, price, blocks, at, *, grant_id=None, cost=None, actor=None):
     week = await ensure_week(conn, guild, at)
     cost = await banners.unit_cost(conn, guild) if cost is None else cost
     for _ in range(blocks):
@@ -97,6 +99,17 @@ async def record_allocation_sale(conn, guild, land_id, kind, price, blocks, at, 
                                               "VALUES (?,?,?,?) RETURNING id", (land_id,kind,price,at.isoformat()))
     await record_sale(conn, guild, week, "grant" if grant_id else "allocation", grant_id or row["id"],
                       kind, blocks, cost, blocks*price, "manual")
+    if kind in ("rotation", "auction"):
+        land = await conn.fetchone("SELECT name FROM lands WHERE guild_id=? AND id=?", (guild,land_id))
+        land_unit = min(price, cost)
+        receipt = dict(land_id=land_id, land_name=land["name"], blocks=blocks, kind=kind, payment="manual",
+                       unit_price=price, total=price*blocks, premium_unit=price-land_unit,
+                       banner=dict(unit_cost=cost, land_unit=land_unit, prepaid_unit=0))
+        # Discord request IDs are positive. Scheduled allocations use the negative purchase ID.
+        action = "claim-reserve" if kind == "auction" else "claim-normal"
+        purchase = await bank._record(conn, guild, actor or 0, -row["id"], action,
+                                      f"{kind.title()} banner allocation", receipt, [])
+        await banners.record_batch(conn, guild, purchase)
 
 
 async def allocate(conn, guild, land_id, kind, price, blocks, *, actor, note=None, grant_id=None, cost=None):
@@ -106,7 +119,7 @@ async def allocate(conn, guild, land_id, kind, price, blocks, *, actor, note=Non
         "UPDATE lands SET chunks=chunks+? WHERE guild_id=? AND id=? RETURNING chunks", (blocks, guild, land_id))
     if not land:
         raise ValueError("This settlement no longer exists.")
-    await record_allocation_sale(conn,guild,land_id,kind,price,blocks,at,grant_id=grant_id,cost=cost)
+    await record_allocation_sale(conn,guild,land_id,kind,price,blocks,at,grant_id=grant_id,cost=cost,actor=actor)
     if note is not None:
         await conn.execute("INSERT INTO block_ledger (land_id,guild_id,type,blocks,note,recorded_by,created_at) "
                            "VALUES (?,?,'owed',?,?,?,?)", (land_id, guild, blocks, note, actor, at.isoformat()))
@@ -197,4 +210,5 @@ async def statement(guild, *, all_time=False):
         liability = unsold*cost
         return dict(week=week, since=prod["since"], produced=int(prod["produced"]), cost=cost, unsold=unsold,
                     liability=liability, position=int(result["net"])-liability, treasury=await bank._balance(conn, guild, treasury["id"]),
+                    payments=await banners.payment_counts(conn,guild),
                     sales={r["category"]: {k:int(v) for k,v in r.items() if k != "category"} for r in rows})

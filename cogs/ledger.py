@@ -12,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
+from cogs.banners import payment_text
 
 
 async def _is_staff(interaction: discord.Interaction) -> bool:
@@ -37,6 +38,21 @@ def _entry_line(entry: dict) -> str:
     return f"`{date}` {emoji} **{'Owed' if entry['type'] == 'owed' else 'Delivered'}** {blocks} block(s){note}"
 
 
+def land_status(land):
+    if land["owner_id"] is None:
+        delivery = "**Archived settlement** · delivery history unavailable"
+    elif land["outstanding"] < 0:
+        delivery = f"Delivery credit · {-land['outstanding']:,} banners"
+    else:
+        delivery = f"**Awaiting delivery** · {land['outstanding']:,} banners"
+    payments = land["payments"]
+    lines = [delivery, payment_text(payments)]
+    unknown = land["total_owed"] - payments.get("tracked", 0)
+    if unknown > 0:
+        lines.append(f"Payment unverified · {unknown:,} banners recorded for delivery without a payment receipt")
+    return "\n".join(lines)
+
+
 class LedgerCog(commands.GroupCog, name="ledger"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -46,11 +62,11 @@ class LedgerCog(commands.GroupCog, name="ledger"):
 
     @app_commands.command(
         name="status",
-        description="View the block delivery backlog for all lands in this server",
+        description="[Staff] Count banners awaiting delivery, bank-paid banners and outstanding manual payments",
     )
     @app_commands.guild_only()
-    async def ledger_status(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+    async def ledger_status(self, interaction: discord.Interaction, page: app_commands.Range[int,1,1_000_000] = 1):
+        await interaction.response.defer(ephemeral=True)
 
         if not await _is_staff(interaction):
             return await interaction.followup.send("🔒 Staff only.", ephemeral=True)
@@ -62,61 +78,41 @@ class LedgerCog(commands.GroupCog, name="ledger"):
                 ephemeral=True,
             )
 
-        # Split into owed vs clear
-        owed_lines = []
-        clear_lines = []
-        for land in lands:
-            outstanding = land["outstanding"]
-            name = land["land_name"]
-            owner = f"<@{land['owner_id']}>"
-            if outstanding > 0:
-                block_word = "block" if outstanding == 1 else "blocks"
-                owed_lines.append(f"🔴 **{name}** — {outstanding} {block_word} owed  ({owner})")
-            elif outstanding < 0:
-                block_word = "block" if abs(outstanding) == 1 else "blocks"
-                clear_lines.append(f"🟡 **{name}** — {abs(outstanding)} {block_word} credit  ({owner})")
-            else:
-                clear_lines.append(f"🟢 **{name}** — All clear")
-
-        description_parts = []
-        if owed_lines:
-            description_parts.append("\n".join(owed_lines))
-        if clear_lines:
-            description_parts.append("\n".join(clear_lines))
-
-        description = "\n\n".join(description_parts) if description_parts else "No data yet."
-
-        embed = discord.Embed(
-            title="📦 Block Delivery Status",
-            description=description,
-            colour=discord.Colour.red() if owed_lines else discord.Colour.green(),
-        )
-        total_outstanding = sum(max(0, l["outstanding"]) for l in lands)
-        embed.set_footer(text=f"Total blocks owed across all lands: {total_outstanding}")
-
-        await interaction.followup.send(embed=embed)
+        per_page = 5
+        page_count = (len(lands)+per_page-1)//per_page
+        if page > page_count:
+            return await interaction.followup.send(f"Choose a page from 1 through {page_count}.", ephemeral=True)
+        owed = sum(max(0, land["outstanding"]) for land in lands)
+        due = sum(land["payments"].get("due_ems",0) for land in lands)
+        banners = sum(land["payments"].get("due_blocks",0) for land in lands)
+        embed = discord.Embed(title="Banner liabilities and deliveries",
+            description=(f"**{owed:,} banners to deliver** · **{due:,} ems to collect on {banners:,} banners**\n\n"
+                         "**Bank paid** means the settlement's payment was debited. **Manual payment due** is the "
+                         "settlement's outstanding liability. An administrator settles it with `/banner create` "
+                         "by collecting from the land's bank or confirming physical emeralds. "
+                         "`/ledger deliver` records the handover. Payment counts include delivered banners."),
+            colour=discord.Colour.orange() if owed or due else discord.Colour.green())
+        for land in lands[(page-1)*per_page:page*per_page]:
+            name = discord.utils.escape_markdown(land["land_name"])[:190]
+            owner = f" · <@{land['owner_id']}>" if land["owner_id"] else ""
+            embed.add_field(name=name+owner, value=land_status(land), inline=False)
+        embed.set_footer(text=f"Page {page}/{page_count} · /banner status shows purchase receipt IDs")
+        await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     # ── /ledger balance ───────────────────────────────────────────────
 
     @app_commands.command(
         name="balance",
-        description="View the delivery balance for a specific land",
+        description="View a land's banner payments, outstanding liability and delivery balance",
     )
     @app_commands.describe(land_name="Land name (leave empty to check your own land)")
     @app_commands.guild_only()
     async def ledger_balance(self, interaction: discord.Interaction, land_name: str = None):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         is_staff = await _is_staff(interaction)
 
         if land_name:
-            if not is_staff:
-                # Non-staff: only allowed to look up their own land by name
-                own_land = await db.get_land_for_user(interaction.guild_id, interaction.user.id)
-                if not own_land or own_land["name"].lower() != land_name.lower():
-                    return await interaction.followup.send(
-                        "🔒 You can only view your own land's balance.", ephemeral=True
-                    )
             land = await db.get_land_by_name(interaction.guild_id, land_name)
         else:
             land = await db.get_land_for_user(interaction.guild_id, interaction.user.id)
@@ -135,39 +131,31 @@ class LedgerCog(commands.GroupCog, name="ledger"):
                     "🔒 Only the land owner, their officers, or staff can view this.", ephemeral=True
                 )
 
-        balance = await db.get_ledger_balance(land["id"])
+        rows = await db.get_all_ledger_status(interaction.guild_id, land["id"])
+        if not rows:
+            return await interaction.followup.send("This settlement is no longer registered.", ephemeral=True)
+        balance = rows[0]
         history = await db.get_ledger_history(land["id"], limit=5)
 
         outstanding = balance["outstanding"]
-        if outstanding > 0:
-            status_line = f"🔴 **{outstanding} block(s) still owed** — leader needs to deliver"
-            colour = discord.Colour.red()
-        elif outstanding < 0:
-            status_line = f"🟡 **{abs(outstanding)} block(s) credit** — over-delivered"
-            colour = discord.Colour.yellow()
-        else:
-            status_line = "🟢 **All clear — no outstanding blocks**"
-            colour = discord.Colour.green()
-
         embed = discord.Embed(
-            title=f"📦 Ledger — {land['name']}",
-            description=status_line,
-            colour=colour,
+            title=f"📦 Ledger — {land['name'][:200]}",
+            description=land_status(balance),
+            colour=discord.Colour.orange() if outstanding or balance["payments"].get("due_ems") else discord.Colour.green(),
         )
-        embed.add_field(name="📥 Total Owed (ever)", value=str(balance["owed"]), inline=True)
-        embed.add_field(name="✅ Total Delivered", value=str(balance["delivered"]), inline=True)
-        embed.add_field(name="📦 Outstanding", value=str(max(0, outstanding)), inline=True)
+        embed.add_field(name="Banners allocated for delivery", value=str(balance["total_owed"]), inline=True)
+        embed.add_field(name="Delivered", value=str(balance["total_delivered"]), inline=True)
 
         if history:
             log_lines = [_entry_line(e) for e in history]
             embed.add_field(
                 name="📋 Recent Activity (last 5)",
-                value="\n".join(log_lines),
+                value="\n".join(line[:175] for line in log_lines),
                 inline=False,
             )
 
-        embed.set_footer(text=f"Owner: {land['owner_id']} • Use /ledger history for full log")
-        await interaction.followup.send(embed=embed)
+        embed.set_footer(text="Payment counts include delivered banners. Use /banner status for individual purchase receipts.")
+        await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     # ── /ledger deliver ───────────────────────────────────────────────
 

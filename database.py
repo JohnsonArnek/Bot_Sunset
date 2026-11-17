@@ -1179,24 +1179,29 @@ async def get_ledger_history(land_id: int, limit: int = 10) -> list[dict]:
         )
 
 
-async def get_all_ledger_status(guild_id: int) -> list[dict]:
-    """Return balance summary for every land in this guild that has any ledger entries."""
-    async with DBConnection() as conn:
+async def get_all_ledger_status(guild_id: int, land_id: int = None) -> list[dict]:
+    """Read delivery and payment counts without joining individual deliveries to purchases."""
+    import banner_store
+    import bank_store
+    params = (guild_id, land_id) if land_id is not None else (guild_id,)
+    async with bank_store.write(guild_id) as conn:
         rows = await conn.fetchall(
             "SELECT l.id as land_id, l.name as land_name, l.owner_id, "
             "COALESCE(SUM(CASE WHEN b.type = 'owed' THEN b.blocks ELSE 0 END), 0) as total_owed, "
             "COALESCE(SUM(CASE WHEN b.type = 'delivered' THEN b.blocks ELSE 0 END), 0) as total_delivered "
             "FROM lands l "
-            "LEFT JOIN block_ledger b ON l.id = b.land_id "
-            "WHERE l.guild_id = ? "
-            "GROUP BY l.id, l.name, l.owner_id "
-            "ORDER BY (COALESCE(SUM(CASE WHEN b.type = 'owed' THEN b.blocks ELSE 0 END), 0) "
-            "         - COALESCE(SUM(CASE WHEN b.type = 'delivered' THEN b.blocks ELSE 0 END), 0)) DESC, l.name ASC",
-            (guild_id,),
-        )
-        # Attach outstanding calculation
-        result = []
-        for r in rows:
-            outstanding = r["total_owed"] - r["total_delivered"]
-            result.append({**r, "outstanding": outstanding})
-        return result
+            "LEFT JOIN block_ledger b ON l.id=b.land_id AND l.guild_id=b.guild_id "
+            "WHERE l.guild_id=?" + (" AND l.id=?" if land_id is not None else "") +
+            " GROUP BY l.id,l.name,l.owner_id", params)
+        payments = await conn.fetchall(banner_store.payment_counts_query(by_land=True, filter_land=land_id is not None), params*2)
+        lands = {row["land_id"]: row for row in rows}
+        for payment in payments:
+            # Bank receipts outlive the land. Its delivery ledger may have been removed.
+            land = lands.setdefault(payment["land_id"], dict(land_id=payment["land_id"], land_name=payment["land_name"],
+                                    owner_id=None,total_owed=0,total_delivered=0))
+            land["payments"] = payment
+        for land in lands.values():
+            land["outstanding"] = land["total_owed"] - land["total_delivered"]
+            land.setdefault("payments", {})
+        return sorted(lands.values(), key=lambda row: (-row["payments"].get("due_ems", 0),
+                      -row["outstanding"], row["land_name"].casefold(), row["land_id"]))

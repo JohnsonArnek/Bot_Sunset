@@ -88,8 +88,8 @@ Approvals and delivery entries do not count as sales. The existing
 `/bank public` includes claim checkouts, accepted rotations, winning auctions
 at their actual bids, and strategic grants. It totals sale prices, costs and the
 result when a sale completes. The bank balance shows actual journal entries.
-Manual sales are reported at the agreed price. The report shows bank payments
-at checkout separately. Only aggregate figures appear in the channel.
+Manual sales are reported at the agreed price. The report also shows the total
+still collectible on tracked manual receipts. Only aggregate figures appear in the channel.
 
 Accounting opens in the deployment week and incorporates that week's recorded
 sales at their original prices and quantities. Earlier weeks are outside the
@@ -105,7 +105,8 @@ liability at the current rate. Sold banners keep their original prices and costs
 
 ## Settling creation costs
 
-Each new normal, leftover or reserve checkout opens a funding record. For a
+Each new normal, leftover or reserve checkout, accepted rotation and winning
+auction bid opens a funding record. For a
 7-emerald sale the land owes 7 and the central budget covers 30. The split stays
 fixed if the land is short. An administrator confirms that funds were spent
 through the existing banner tracker. This cash settlement does not release the
@@ -113,6 +114,8 @@ weekly liability a second time.
 
 | Command | Purpose |
 | --- | --- |
+| `/ledger status` | Staff see delivery backlog and payment counts by land in a private, paginated report |
+| `/ledger balance land_name:Coppercross` | Owner, officers or staff see that land's payments and deliveries |
 | `/banner status land_name:Coppercross` | Owner/officers read the land's creation backlog and liabilities |
 | `/banner status` | Administrator sees all tracked purchases and total liabilities |
 | `/banner show purchase_id:123` | Fixed cost split and recent creation records for a purchase receipt |
@@ -142,10 +145,17 @@ funding needed. These are obligations, not reserved funds. Costs and subsidy
 splits are frozen at checkout; later config, ownership or tier changes do not
 rewrite them. Creation records and obligations survive land deletion.
 
-Creation is an administrator action. `/ledger deliver` still only records
-delivery and cannot spend money or clear creation liabilities. The tracker covers
-normal, reserve and leftover checkouts made with this release. The public statement
-also includes rotation, auction and strategic allocations at their recorded prices.
+**Bank paid** counts banners paid at checkout or debited from the settlement
+bank at creation. **Manual payment due** counts the banners and emeralds still
+owed by the settlement, including any premium. **Physical payment confirmed**
+counts the quantity an administrator settled with `/banner create land_payment:physical`.
+Free banners have a zero settlement liability. Payment counts include delivered banners.
+
+For example, two manual banners at 7 ems each leave 14 ems to collect, even
+after both are delivered. Confirming one at creation clears 7 ems. Older
+delivery entries without payment evidence appear as unverified. The public
+stock estimate, the land's purchase payment and the physical delivery are
+tracked independently.
 Private tables use the RLS-enabled `sunset_banners` schema alongside the bank.
 
 ## Public settlement libraries

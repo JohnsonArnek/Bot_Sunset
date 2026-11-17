@@ -73,6 +73,10 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
                         f"All-time sale result less unsold liability **{report['position']:+,} ems**",
                         inline=False)
         embed.add_field(name="Central treasury bank balance", value=f"**{report['treasury']:,} ems**")
+        payments = report["payments"]
+        embed.add_field(name="Manual payments still owed by settlements",
+                        value=f"**{payments['due_blocks']:,} banners · {payments['due_ems']:,} ems to collect** "
+                        "across all tracked receipts.", inline=False)
         embed.set_footer(text="Sales are booked at purchase. Manual amounts are sale prices. Unsold banners are valued at the current creation cost.")
         await interaction.followup.send(embed=embed, ephemeral=False, allowed_mentions=discord.AllowedMentions.none())
 

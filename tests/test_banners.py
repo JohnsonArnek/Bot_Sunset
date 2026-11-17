@@ -14,6 +14,7 @@ import banner_store as banners
 import banner_account as public
 from cogs.bank import BankCog
 from cogs.banners import BannerCog
+from cogs.ledger import LedgerCog, land_status
 from test_bank import AT, BankContract, interaction
 
 
@@ -38,6 +39,52 @@ class BannerContract:
 
     async def totals(self):
         return (await banners.status(self.guild,900,admin=True))["totals"]
+
+    async def test_payment_liability_survives_delivery_and_partial_settlement(self):
+        land, receipt = await self.purchase(blocks=3)
+        await db.add_ledger_delivered(land["id"],self.guild,3,note="Paid in full")
+        await self.deposit(90,request_id=3,treasury=True)
+        await self.deposit(7,request_id=4,land_name="Test Keep")
+        await self.create(receipt,land_payment="physical")
+        await self.create(receipt,request_id=11)
+        await self.create(receipt,request_id=11)
+        row, = await db.get_all_ledger_status(self.guild)
+        self.assertEqual(row["outstanding"],0)
+        p = row["payments"]
+        self.assertEqual((p["due_blocks"],p["due_ems"],p["bank_blocks"],p["bank_ems"],
+                          p["physical_blocks"],p["physical_ems"]),(1,7,1,7,1,7))
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],7)
+        await db.add_ledger_owed(land["id"],self.guild,2,note="manual payment")
+        self.assertIn("Payment unverified · 2",land_status((await db.get_all_ledger_status(self.guild))[0]))
+        await db.delete_land(land["id"])
+        archived, = await db.get_all_ledger_status(self.guild)
+        self.assertIsNone(archived["owner_id"])
+        self.assertEqual(archived["payments"]["due_ems"],7)
+
+    async def test_bank_paid_free_and_reserve_premium_counts(self):
+        _,receipt = await self.purchase(payment="bank",funds=7)
+        await db.update_reserve_blocks(self.guild,4)
+        reserve = await bank.buy_claim(self.guild,10,request_id=3,kind="reserve")
+        free = await self.land(owner=20,chunks=0,name="New Keep")
+        await self.approval(free)
+        await bank.buy_claim(self.guild,20,request_id=4,payment="bank")
+        before = (await public.statement(self.guild))["payments"]
+        self.assertEqual((before["due_ems"],before["bank_ems"],before["bank_blocks"],before["free_blocks"]),(56,7,1,1))
+        await self.create(reserve,land_payment="physical")
+        after = (await public.statement(self.guild))["payments"]
+        self.assertEqual((after["due_ems"],after["physical_ems"],after["bank_ems"]),(0,56,7))
+        self.assertEqual((await public.statement(self.guild+1))["payments"]["tracked"],0)
+
+    async def test_bank_receipt_predating_tracker_is_evidence_of_payment(self):
+        land = await self.land()
+        legacy = dict(kind="normal",land_id=land["id"],land_name=land["name"],payment="bank",unit_price=7,total=14,blocks=2)
+        async with bank.write(self.guild) as conn:
+            await bank._record(conn,self.guild,10,76,"claim-normal","historic bank receipt",legacy,[])
+        await db.add_ledger_owed(land["id"],self.guild,3)
+        row, = await db.get_all_ledger_status(self.guild,land["id"])
+        self.assertEqual((row["payments"]["bank_blocks"],row["payments"]["bank_ems"]),(2,14))
+        self.assertIn("Payment unverified · 1",land_status(row))
+        self.assertEqual((await banners.status(self.guild,900,admin=True))["batches"],[])
 
     async def test_public_price_results_stock_and_cash(self):
         opening = await public.statement(self.guild)
@@ -142,6 +189,12 @@ class BannerContract:
         self.assertEqual((r["unsold"],r["sales"]["reserve"]["revenue"],r["sales"]["reduced"]["sold"]),(3,60,3))
         self.assertEqual((await db.get_reserve(self.guild))["total_blocks"],3)
         self.assertEqual(await self.state(land),dict(chunks=7,purchases=4,deliveries=2))
+        status = await banners.status(self.guild,900,admin=True)
+        self.assertEqual((status["payments"]["due_blocks"],status["payments"]["due_ems"]),(3,74))
+        auction_purchase = next(row for row in status["batches"] if row["sale_unit"]==60)
+        await self.create({"operation_id":auction_purchase["id"]},land_payment="physical")
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],14)
+        self.assertEqual(await self.balance(treasury=True),23)
 
     async def test_fixed_split_and_insufficient_land_never_increases_subsidy(self):
         land,r = await self.purchase()
@@ -300,6 +353,19 @@ class BannerSQLite(BannerContract,unittest.IsolatedAsyncioTestCase):
         self.assertIn("222 ems liability", contents)
         self.assertNotIn("Test Keep", contents)
         self.assertNotIn("Counted deposit", contents)
+
+    async def test_private_ledger_status_and_balance_explain_pending_payment(self):
+        await self.purchase(blocks=2)
+        cog, i = LedgerCog(None), interaction(self.guild)
+        with patch("cogs.ledger._is_staff",return_value=False):
+            await cog.ledger_status.callback(cog,i)
+        self.assertIn("Staff only",i.followup.send.await_args.args[0])
+        with patch("cogs.ledger._is_staff",return_value=True):
+            for command in (cog.ledger_status,cog.ledger_balance):
+                await command.callback(cog,i)
+                args = i.followup.send.await_args.kwargs
+                self.assertTrue(args["ephemeral"])
+                self.assertIn("14 ems",str(args["embed"].to_dict()))
 
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"),"needs disposable PostgreSQL")
