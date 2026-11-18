@@ -23,7 +23,7 @@ AT = datetime(2026, 11, 13, 12, tzinfo=timezone.utc)
 
 
 def interaction(guild, user=10, admin=False, request_id=100):
-    return SimpleNamespace(id=request_id, guild_id=guild, user=SimpleNamespace(id=user, roles=[]),
+    return SimpleNamespace(id=request_id, guild_id=guild, channel_id=123, user=SimpleNamespace(id=user, roles=[]),
                            permissions=discord.Permissions(administrator=admin),
                            response=AsyncMock(), followup=AsyncMock())
 

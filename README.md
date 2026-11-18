@@ -114,8 +114,9 @@ weekly liability a second time.
 
 | Command | Purpose |
 | --- | --- |
-| `/ledger status` | Staff see delivery backlog and payment counts by land in a private, paginated report |
+| `/ledger status` | Staff browse payment and delivery totals, then select a settlement for its breakdown and recent activity |
 | `/ledger balance land_name:Coppercross` | Owner, officers or staff see that land's payments and deliveries |
+| `/ledger history land_name:Coppercross limit:25` | Browse the most recent delivery entries and their complete notes in private |
 | `/banner status land_name:Coppercross` | Owner/officers read the land's creation backlog and liabilities |
 | `/banner status` | Administrator sees all tracked purchases and total liabilities |
 | `/banner show purchase_id:123` | Fixed cost split and recent creation records for a purchase receipt |
@@ -280,7 +281,9 @@ ledger leads with double chests, single chests, stacks and loose remainders;
 diamonds and iron use **containers of blocks**. Exact individual-item totals
 remain visible in parentheses. For example, 12,000 hay reads **3 double chests +
 25 stacks + 32 loose hay**; 31,104 diamonds reads **1 double chest of blocks**.
-The full ledger shows three depots per page, plus the server totals.
+The stock list shows three depots per page alongside server totals. Select a depot
+for its inventory, use **Back to list** to return, or **Refresh** to read current counts.
+The location option suggests matching depots as you type.
 Only Discord Administrators can use these commands, including reads and
 estimates. Replies start private, and each server has its own stock and rules.
 Use **Share estimate in this channel** on a conquest, logistics, or targeted

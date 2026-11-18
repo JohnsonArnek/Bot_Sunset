@@ -557,6 +557,17 @@ async def get_land_by_id(land_id: int) -> dict | None:
         return await conn.fetchone("SELECT * FROM lands WHERE id = ?", (land_id,))
 
 
+async def ledger_land_names(guild, actor, text, *, staff):
+    pattern = text.strip().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    query = "SELECT l.name FROM lands l WHERE l.guild_id=? AND LOWER(l.name) LIKE LOWER(?) ESCAPE '!'"
+    params = (guild, f"%{pattern}%")
+    if not staff:
+        query += " AND (l.owner_id=? OR EXISTS (SELECT 1 FROM officers o WHERE o.land_id=l.id AND o.user_id=?))"
+        params += (actor, actor)
+    async with DBConnection() as conn:
+        return await conn.fetchall(query+" ORDER BY LOWER(l.name),l.id LIMIT 25", params)
+
+
 async def update_land_chunks(land_id: int, new_chunks: int):
     async with DBConnection() as conn:
         await conn.execute("UPDATE lands SET chunks = ? WHERE id = ?", (new_chunks, land_id))

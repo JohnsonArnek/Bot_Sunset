@@ -1,5 +1,7 @@
 """Administrator-only strategic reserves and settlement assault planning."""
 
+import asyncio
+import logging
 from decimal import Decimal
 from typing import Literal
 
@@ -8,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import war_store as stock
+from cogs.report_view import NO_MENTIONS, ReportView, clip
 from cogs.war_share import ShareEstimate, message_payload
 from war_display import assumptions, duration, inventory, quantity
 from war_planner import IRON_PER_BLOCK, block_shipment, defence_transfer, delivery_time, estimate, pack, plan_transport, stock_quantity
@@ -21,20 +24,67 @@ Location = app_commands.Range[str, 1, 64]
 Mode = Literal["donkey", "chest_boat", "chest_minecart"]
 
 
-async def reply(interaction, text, *, share_text=None):
-    options = {}
+async def reply(interaction, text):
+    await interaction.followup.send(**message_payload(text), ephemeral=True, allowed_mentions=NO_MENTIONS)
+
+
+async def send_report(interaction, embed, *, share_text=None, view=None):
     if share_text is not None:
-        text += "\n\nShare publishes this estimate and its assumptions. Private stock checks and manifests are excluded."
-        options["view"] = ShareEstimate(interaction, share_text)
-    payload = message_payload(text)
-    # Keep short replies as text; longer estimates use Discord's larger embed limit.
-    content = payload.pop("content", None)
-    await interaction.followup.send(content, **payload, **options, ephemeral=True,
-                                    allowed_mentions=discord.AllowedMentions.none())
+        view = ShareEstimate(interaction, share_text)
+        embed.set_footer(text="Estimate only. Share publishes the calculation and its assumptions. Depot names and stock checks stay private.")
+    controls = {"view": view} if view is not None else {}
+    await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_MENTIONS, **controls)
 
 
 def label(location):
     return discord.utils.escape_markdown(stock.clean_location(location))
+
+
+def depot_embed(location, row, rules, change=None):
+    embed = discord.Embed(title=clip(f"Depot · {label(location)}", 256), description=change, colour=discord.Colour.teal())
+    for resource in stock.RESOURCES:
+        embed.add_field(name=resource.title(), value=quantity(row[resource], resource, rules), inline=True)
+    return embed
+
+
+async def depot_report(interaction, page, selection):
+    if interaction.guild_id is None or not interaction.permissions.administrator:
+        raise PermissionError
+    guild = interaction.guild_id
+    rules = await stock.rules_for(guild)
+    if selection is not None:
+        row = await stock.available(guild, selection)
+        if row is not None:
+            return depot_embed(selection, row, rules), ReportView(interaction, depot_report, page, 1, selection=selection)
+    overview = await stock.stock_overview(guild)
+    pages = max(1, (overview["depots"]+2)//3)
+    page = min(max(1, page), pages)
+    rows = await stock.stock_page(guild, page)
+    embed = discord.Embed(title="Strategic reserves", colour=discord.Colour.teal())
+    if rows:
+        if selection is not None:
+            embed.description = "That depot is no longer on file."
+        embed.add_field(name="All depots combined", value=inventory(overview, rules), inline=False)
+        for row in rows:
+            embed.add_field(name=clip(label(row["location"]), 256), value=inventory(row, rules), inline=False)
+    else:
+        embed.description = "No depots recorded. Use `/war stock-set` to enter the first stock count."
+    embed.set_footer(text=f"{overview['depots']:,} depots · Page {page}/{pages}")
+    return embed, ReportView(interaction, depot_report, page, pages, prompt="Inspect a depot",
+                             choices=[(r["location"], r["location"]) for r in rows])
+
+
+async def depot_choices(interaction, current):
+    if interaction.guild_id is None or not interaction.permissions.administrator:
+        return []
+    try:
+        async with asyncio.timeout(2):
+            rows = await stock.matching_locations(interaction.guild_id, current)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Depot suggestions unavailable (%s)", type(exc).__name__)
+        return []
+    return [app_commands.Choice(name=r["location"], value=r["location"]) for r in rows
+            if len(r["location"].encode("utf-16-le")) <= 200]
 
 
 def supply(resource, needed, held, rules):
@@ -62,13 +112,12 @@ def transport(cargo, journey):
 
 
 def packing_assumptions(rules):
-    return (f"Packing: {rules.stack_size}/stack; slots per donkey {rules.donkey_slots}, "
-            f"chest boat {rules.chest_boat_slots}, chest {rules.chest_slots}, "
-            f"double chest {rules.double_chest_slots}, chest minecart {rules.chest_minecart_slots}. "
-            "Diamonds/iron compact into blocks; loose remainders use separate slots.\n"
-            f"Each trip: {duration(rules.loading_minutes * 60)} loading + "
-            f"{duration(rules.unloading_minutes * 60)} unloading for the whole convoy. "
-            "Supplies pooled at departure; crafting time excluded.")
+    return (f"**Packing** · {rules.stack_size}/stack · slots per donkey {rules.donkey_slots}, "
+            f"chest boat {rules.chest_boat_slots}, chest minecart {rules.chest_minecart_slots}, "
+            f"chest {rules.chest_slots}, double chest {rules.double_chest_slots}. "
+            "Diamonds and iron travel in blocks with separate slots for loose items.\n"
+            f"**Each trip** · load {duration(rules.loading_minutes * 60)} + unload "
+            f"{duration(rules.unloading_minutes * 60)} for the convoy. Supplies start together. Travel time excludes crafting.")
 
 
 def storage(cargo):
@@ -130,6 +179,7 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
 
     @app_commands.command(name="stock-set", description="Set the specified resource balances at a depot; omitted resources keep their counts")
     @depot_options
+    @app_commands.autocomplete(location=depot_choices)
     async def stock_set(self, interaction: discord.Interaction, location: Location, hay: Quantity = None,
                         diamonds: Quantity = None, iron: Quantity = None, arrows: Quantity = None, logs: Quantity = None):
         try:
@@ -138,10 +188,11 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         except ValueError as exc:
             return await reply(interaction, str(exc))
         rules = await stock.rules_for(interaction.guild_id)
-        await reply(interaction, f"**{label(row['location'])}** now holds:\n{inventory(row, rules)}")
+        await send_report(interaction, depot_embed(row["location"], row, rules, "Stock count recorded."))
 
     @app_commands.command(name="stock-add", description="Add a delivery of resources to an existing depot")
     @depot_options
+    @app_commands.autocomplete(location=depot_choices)
     async def stock_add(self, interaction: discord.Interaction, location: Location,
                         hay: Quantity = None, diamonds: Quantity = None, iron: Quantity = None, arrows: Quantity = None,
                         logs: Quantity = None):
@@ -149,6 +200,7 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
 
     @app_commands.command(name="stock-subtract", description="Withdraw resources from an existing depot")
     @depot_options
+    @app_commands.autocomplete(location=depot_choices)
     async def stock_subtract(self, interaction: discord.Interaction, location: Location,
                              hay: Quantity = None, diamonds: Quantity = None, iron: Quantity = None, arrows: Quantity = None,
                              logs: Quantity = None):
@@ -163,10 +215,11 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
             return await reply(interaction, str(exc))
         rules = await stock.rules_for(interaction.guild_id)
         changed = " and ".join(quantity(n, k, rules) for k, n in counts.items() if n)
-        await reply(interaction, f"{'Withdrew' if withdraw else 'Added'} {changed}. "
-                    f"**{label(balance['location'])}** now holds:\n{inventory(balance, rules)}")
+        await send_report(interaction, depot_embed(balance["location"], balance, rules,
+                                                  f"{'Withdrew' if withdraw else 'Added'} {changed}."))
 
     @app_commands.command(name="stock-remove", description="Remove one location and its stock from this server's reserves")
+    @app_commands.autocomplete(location=depot_choices)
     async def stock_remove(self, interaction: discord.Interaction, location: Location):
         try:
             await stock.remove_stock(interaction.guild_id, location)
@@ -176,28 +229,23 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
 
     @app_commands.command(name="stock-list", description="Show reserve locations and their current balances")
     @app_commands.describe(location="Show only this depot or settlement; omit to show paginated reserves")
+    @app_commands.autocomplete(location=depot_choices)
     async def stock_list(self, interaction: discord.Interaction, page: PositiveCount = 1, location: Location = None):
-        rules = await stock.rules_for(interaction.guild_id)
         if location is not None:
             try:
-                row = await stock.available(interaction.guild_id, location)
+                location = stock.clean_location(location)
             except ValueError as exc:
                 return await reply(interaction, str(exc))
-            if row is None:
-                return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
-            return await reply(interaction, f"**{label(location)}**\n{inventory(row, rules)}")
-        rows = await stock.stock_page(interaction.guild_id, page)
-        if not rows:
-            return await reply(interaction, "No locations on this page. Use /war stock-set to record supplies.")
-        totals = await stock.available(interaction.guild_id)
-        lines = [f"**All reserves:**\n{inventory(totals, rules)}", f"Locations · page {page} (3 per page)"]
-        lines.extend(f"**{label(r['location'])}**\n{inventory(r, rules)}" for r in rows)
-        lines.append("Use /war logistics for transport and chest space, or /war defence for iron transfer capacity.")
-        await reply(interaction, "\n".join(lines))
+        embed, view = await depot_report(interaction, page, location)
+        if location is not None and view.selection is None:
+            view.stop()
+            return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
+        await send_report(interaction, embed, view=view)
 
     @app_commands.command(description="Estimate transport loads and chest space for the supplies in stock")
     @app_commands.describe(location="Depot to pack; omit to estimate all supplies consolidated in one place")
     @route_options
+    @app_commands.autocomplete(location=depot_choices)
     async def logistics(self, interaction: discord.Interaction, location: Location = None,
                         travel_minutes: Minutes = None, mode: Mode = "donkey", carriers: PositiveCount = 1):
         try:
@@ -214,15 +262,22 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         except ValueError as exc:
             return await reply(interaction, str(exc))
         scope = label(location) if location is not None else "all depots, if pooled"
-        public = (f"**Assumptions**\n{packing_assumptions(rules)}\n"
-                  "Arrows excluded (inventory only).\n"
-                  f"**Packing estimate**\nTransport: {transport(cargo, journey)}\nStorage: {storage(cargo)}.\n{route}")
+        conditions = f"**Assumptions**\n{packing_assumptions(rules)}\nArrows excluded (inventory only)."
+        loads = transport(cargo, journey)
+        space = storage(cargo)
+        public = f"{conditions}\n**Packing estimate**\nTransport: {loads}\nStorage: {space}.\n{route}"
         manifest = "\n".join(f"{k.title()}: {quantity(held[k], k, rules)}" for k in ("hay", "diamonds", "iron", "logs"))
-        await reply(interaction, public + f"\n**Private manifest: {scope}**\n{manifest}", share_text=public)
+        embed = discord.Embed(title="Transport estimate", description=conditions, colour=discord.Colour.teal())
+        embed.add_field(name="Transport", value=loads, inline=False)
+        embed.add_field(name="Storage", value=space, inline=False)
+        embed.add_field(name="Journey time", value=route, inline=False)
+        embed.add_field(name=clip(f"Private manifest · {scope}", 256), value=manifest, inline=False)
+        await send_report(interaction, embed, share_text=public)
 
     @app_commands.command(description="Estimate transferable defence from iron; optionally check a target amount")
     @app_commands.describe(location="Use this depot; omit to pool all iron on this server",
                            points="Defence points you want to transfer")
+    @app_commands.autocomplete(location=depot_choices)
     async def defence(self, interaction: discord.Interaction, points: app_commands.Range[int, 1, 2**53 - 1] = None,
                       location: Location = None):
         try:
@@ -237,16 +292,18 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         public = (f"**Assumptions**\n{IRON_PER_BLOCK} iron ingots per block; "
                   f"{rules.defence_per_block:,} defence per whole iron block. Diamond blocks are accounting only.\n"
                   "Estimate only; no stock deducted.")
-        lines = [f"**Transferable defence: {plan.capacity:,} points** · {scope}",
-                 quantity(held["iron"], "iron", rules)]
+        embed = discord.Embed(title="Defence transfer", description=public, colour=discord.Colour.teal())
+        embed.add_field(name=f"Transferable defence: {plan.capacity:,} points",
+                        value=f"{scope}\n{quantity(held['iron'], 'iron', rules)}", inline=False)
         if points is not None:
             verdict = f"short {plan.missing_ingots:,} ingots" if plan.missing_ingots else "enough iron"
-            lines.append(f"For {points:,} defence: {plan.required_blocks:,} blocks "
-                         f"({plan.required_blocks * IRON_PER_BLOCK:,} ingots) · {verdict}.")
+            embed.colour = discord.Colour.orange() if plan.missing_ingots else discord.Colour.green()
+            embed.add_field(name=f"Target · {points:,} points",
+                            value=f"{plan.required_blocks:,} blocks ({plan.required_blocks * IRON_PER_BLOCK:,} ingots) · **{verdict}**",
+                            inline=False)
             public += (f"\n**Defence target: {points:,} points**\nRequired: "
                        f"{quantity(plan.required_blocks * IRON_PER_BLOCK, 'iron', rules)}.")
-        await reply(interaction, public + "\n**Private stock check**\n" + "\n".join(lines),
-                    share_text=public if points is not None else None)
+        await send_report(interaction, embed, share_text=public if points is not None else None)
 
     @app_commands.command(description="Show this server's war rules, or update only the options you supply")
     @app_commands.describe(
@@ -293,25 +350,27 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
             rules = await stock.configure(interaction.guild_id, {k: v for k, v in options.items() if v is not None})
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        await reply(interaction,
-                    f"**War rules for this server**\n"
-                    f"Axe: {rules.diamonds_per_axe} diamonds + {rules.sticks_per_axe} sticks · {rules.axe_durability} hits · "
-                    f"{rules.damage_per_hit} HP per hit · {rules.rehit_seconds} s between hits.\n"
-                    f"Wood: {rules.planks_per_log} planks per log · "
-                    f"{rules.sticks_per_batch} sticks per {rules.planks_per_batch} planks.\n"
-                    f"Food: {rules.bread_per_hay} bread per hay · {rules.hunger_per_bread} hunger per bread. "
-                    f"Each attacker loses {rules.hunger_loss} hunger every {rules.hits_per_hunger_loss} hits.\n"
-                    f"Packing: {rules.stack_size} per stack · slots per donkey: {rules.donkey_slots}, "
-                    f"chest boat: {rules.chest_boat_slots}, single chest: {rules.chest_slots}, "
-                    f"double chest: {rules.double_chest_slots}, chest minecart: {rules.chest_minecart_slots}.\n"
-                    f"Iron: {rules.defence_per_block:,} defence per block ({IRON_PER_BLOCK} ingots).\n"
-                    f"Per trip: {duration(rules.loading_minutes * 60)} loading · "
-                    f"{duration(rules.unloading_minutes * 60)} unloading.")
+        embed = discord.Embed(title="Military rules", colour=discord.Colour.teal())
+        changed = [key for key, value in options.items() if value is not None]
+        if changed:
+            embed.description = "Updated " + ", ".join(f"`{key}`" for key in changed) + "."
+        embed.add_field(name="Diamond axes", value=f"{rules.diamonds_per_axe} diamonds + {rules.sticks_per_axe} sticks per axe\n"
+                        f"{rules.axe_durability} hits · {rules.damage_per_hit} HP/hit · {rules.rehit_seconds}s between hits")
+        embed.add_field(name="Wood", value=f"{rules.planks_per_log} planks/log\n{rules.sticks_per_batch} sticks per {rules.planks_per_batch} planks")
+        embed.add_field(name="Food", value=f"{rules.bread_per_hay} bread/hay · {rules.hunger_per_bread} hunger/bread\n"
+                        f"{rules.hunger_loss} hunger lost per {rules.hits_per_hunger_loss} hits")
+        embed.add_field(name="Transport and storage", value=f"{rules.stack_size} items/stack\nSlots per carrier · donkey {rules.donkey_slots}, "
+                        f"chest boat {rules.chest_boat_slots}, chest minecart {rules.chest_minecart_slots}\n"
+                        f"Slots per chest · single {rules.chest_slots}, double {rules.double_chest_slots}", inline=False)
+        embed.add_field(name="Iron defence", value=f"{rules.defence_per_block:,} points/block · {IRON_PER_BLOCK} ingots/block")
+        embed.add_field(name="Handling per trip", value=f"Load {duration(rules.loading_minutes * 60)} · unload {duration(rules.unloading_minutes * 60)}")
+        await send_report(interaction, embed)
 
     @app_commands.command(description="Estimate the time and check whether recorded supplies cover a settlement assault")
     @app_commands.describe(hp="Remaining settlement HP", players="Number of simultaneous attackers",
                            location="Use only this location; omit to pool all reserves")
     @route_options
+    @app_commands.autocomplete(location=depot_choices)
     async def conquerable(self, interaction: discord.Interaction, hp: app_commands.Range[int, 1, 2_000_000_000],
                           players: PositiveCount, location: Location = None,
                           travel_minutes: Minutes = None, mode: Mode = "donkey", carriers: PositiveCount = 1):
@@ -333,21 +392,27 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
         enough = (held["diamonds"] >= shipped_diamonds and held["hay"] >= plan.hay and held["logs"] >= plan.logs)
         verdict = "Enough supplies" if enough else "Insufficient supplies"
         scope = label(location) if location is not None else "all reserve locations"
-        public = (f"{assumptions(rules)}\n{packing_assumptions(rules)}\n"
-                  f"**Conquest estimate: {hp:,} HP · {players:,} players**\n"
-                  f"{plan.attackers:,} active attackers · {plan.hits:,} hits across {plan.volleys:,} volleys\n"
-                  f"**Time if equipped: {duration(plan.seconds)}** from first hit to last.\n"
-                  "Ship hay, logs and whole diamond blocks; craft at the objective.\n"
-                  f"**Shipment**\nDiamonds: {quantity(shipped_diamonds, 'diamonds', rules)} "
-                  f"({plan.diamonds:,} used for {plan.axes:,} axes; {shipped_diamonds - plan.diamonds} spare diamonds)\n"
-                  f"{quantity(plan.logs, 'logs', rules)} ({plan.planks:,} planks consumed; {plan.sticks:,} sticks needed)\n"
-                  f"{quantity(plan.hay, 'hay', rules)} → {quantity(plan.bread, 'bread', rules)} needed\n"
-                  f"**Transport and storage**\n{transport(raw, journey)}\nStorage: {storage(raw)}.\n{route}")
-        private = (f"\n**Private stock check: {verdict}** · {scope}\n"
-                   f"{supply('diamonds', shipped_diamonds, held['diamonds'], rules)}\n"
-                   f"{supply('hay', plan.hay, held['hay'], rules)}\n"
-                   f"{supply('logs', plan.logs, held['logs'], rules)}")
-        await reply(interaction, public + private, share_text=public)
+        conditions = f"{assumptions(rules)}\n{packing_assumptions(rules)}"
+        title = f"Conquest estimate · {hp:,} HP · {players:,} players"
+        timing = (f"**Time if equipped: {duration(plan.seconds)}** from first hit to last.\n"
+                  f"{plan.attackers:,} active attackers · {plan.hits:,} hits across {plan.volleys:,} volleys")
+        shipment = (f"Diamonds: {quantity(shipped_diamonds, 'diamonds', rules)} "
+                    f"({plan.diamonds:,} used for {plan.axes:,} axes, {shipped_diamonds - plan.diamonds} spare diamonds)\n"
+                    f"{quantity(plan.logs, 'logs', rules)} ({plan.planks:,} planks consumed, {plan.sticks:,} sticks needed)\n"
+                    f"{quantity(plan.hay, 'hay', rules)} → {quantity(plan.bread, 'bread', rules)} needed\n"
+                    "Craft axes and bread at the objective.")
+        loads = f"{transport(raw, journey)}\nStorage: {storage(raw)}."
+        public = f"{conditions}\n**{title}**\n{timing}\n**Shipment**\n{shipment}\n**Transport and storage**\n{loads}\n{route}"
+        private = "\n".join(supply(k, needed, held[k], rules) for k, needed in
+                            (("diamonds", shipped_diamonds), ("hay", plan.hay), ("logs", plan.logs)))
+        embed = discord.Embed(title=title, description=conditions,
+                              colour=discord.Colour.green() if enough else discord.Colour.orange())
+        embed.add_field(name=f"Private stock check · {verdict}", value=f"{scope}\n{private}", inline=False)
+        embed.add_field(name="Combat time", value=timing, inline=False)
+        embed.add_field(name="Shipment", value=shipment, inline=False)
+        embed.add_field(name="Transport and storage", value=loads, inline=False)
+        embed.add_field(name="Journey time", value=route, inline=False)
+        await send_report(interaction, embed, share_text=public)
 
 
 async def setup(bot: commands.Bot):

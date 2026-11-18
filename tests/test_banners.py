@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import database as db
@@ -14,7 +14,7 @@ import banner_store as banners
 import banner_account as public
 from cogs.bank import BankCog
 from cogs.banners import BannerCog
-from cogs.ledger import LedgerCog, land_status
+from cogs.ledger import LedgerCog, land_status, settlement_choices
 from test_bank import AT, BankContract, interaction
 
 
@@ -366,6 +366,55 @@ class BannerSQLite(BannerContract,unittest.IsolatedAsyncioTestCase):
                 args = i.followup.send.await_args.kwargs
                 self.assertTrue(args["ephemeral"])
                 self.assertIn("14 ems",str(args["embed"].to_dict()))
+
+    async def test_ledger_directory_navigation_uses_live_staff_access(self):
+        for n in range(6):
+            await self.land(owner=10+n, name=f"Keep {n}")
+        cog, i = LedgerCog(None), interaction(self.guild)
+        i.edit_original_response = AsyncMock()
+        with patch("cogs.ledger._is_staff", return_value=True):
+            await cog.ledger_status.callback(cog,i)
+            first = i.followup.send.await_args.kwargs["view"]
+            await first.next_page.callback(i)
+            second = i.edit_original_response.await_args.kwargs["view"]
+            self.assertTrue(first.is_finished())
+            self.assertTrue(second.next_page.disabled)
+            pick = next(c for c in second.children if hasattr(c,"options"))
+            pick._values = ["0"]
+            await pick.callback(i)
+            details = i.edit_original_response.await_args.kwargs
+            self.assertIn("Keep 5",details["embed"].title)
+            await details["view"].back.callback(i)
+            current = i.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual(current.page,2)
+        with patch("cogs.ledger._is_staff", return_value=False):
+            await current.refresh.callback(i)
+        self.assertIsNone(i.edit_original_response.await_args.kwargs["embed"])
+
+    async def test_history_preserves_long_notes_and_land_choice_permissions(self):
+        land = await self.land(name="100% Keep")
+        await self.land(name="Elsewhere",owner=25)
+        await db.add_officer(land["id"],11)
+        i = interaction(self.guild,user=11)
+        i.edit_original_response = AsyncMock()
+        note = "🌅"*4800 + "end of note"
+        await db.add_ledger_owed(land["id"],self.guild,1,note=note)
+        cog = LedgerCog(None)
+        with patch("cogs.ledger._is_staff", return_value=False):
+            self.assertEqual([c.name for c in await settlement_choices(i,"%")],["100% Keep"])
+            self.assertEqual(len(await settlement_choices(i,"")),1)
+            await cog.ledger_history.callback(cog,i,land_name="100% Keep")
+            call = i.followup.send.await_args.kwargs
+            self.assertTrue(call["ephemeral"])
+            descriptions = []
+            while True:
+                descriptions.append(call["embed"].description)
+                self.assertLessEqual(len(descriptions[-1].encode("utf-16-le"))//2,4096)
+                if call["view"].next_page.disabled:
+                    break
+                await call["view"].next_page.callback(i)
+                call = i.edit_original_response.await_args.kwargs
+            self.assertIn(note,"".join(descriptions))
 
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"),"needs disposable PostgreSQL")

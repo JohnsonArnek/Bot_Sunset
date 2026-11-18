@@ -86,15 +86,27 @@ async def stock_page(guild, page, size=3):
         )
 
 
-async def available(guild, location=None):
+async def matching_locations(guild, text):
+    query = " ".join(text.split()).casefold().replace("!", "!!").replace("%", "!%").replace("_", "!_")
     async with db.DBConnection() as conn:
-        if location is not None:
-            return await conn.fetchone(
-                f"SELECT {_COLUMNS} FROM {_prefix()}war_stock WHERE guild_id=? AND location_key=?",
-                (guild, clean_location(location).casefold()),
-            )
-        totals = ", ".join(f"COALESCE(SUM({k}),0) AS {k}" for k in RESOURCES)
-        return await conn.fetchone(f"SELECT {totals} FROM {_prefix()}war_stock WHERE guild_id=?", (guild,))
+        return await conn.fetchall(f"SELECT location FROM {_prefix()}war_stock WHERE guild_id=? "
+                                   "AND location_key LIKE ? ESCAPE '!' ORDER BY location_key LIMIT 25",
+                                   (guild, f"%{query}%"))
+
+
+async def stock_overview(guild):
+    totals = ", ".join(f"COALESCE(SUM({k}),0) AS {k}" for k in RESOURCES)
+    async with db.DBConnection() as conn:
+        return await conn.fetchone(f"SELECT COUNT(*) AS depots, {totals} FROM {_prefix()}war_stock WHERE guild_id=?", (guild,))
+
+
+async def available(guild, location=None):
+    if location is None:
+        totals = await stock_overview(guild)
+        return {key: totals[key] for key in RESOURCES}
+    async with db.DBConnection() as conn:
+        return await conn.fetchone(f"SELECT {_COLUMNS} FROM {_prefix()}war_stock WHERE guild_id=? AND location_key=?",
+                                   (guild, clean_location(location).casefold()))
 
 
 async def rules_for(guild):

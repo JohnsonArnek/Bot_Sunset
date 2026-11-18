@@ -15,15 +15,18 @@ from discord.webhook.async_ import async_context
 
 import database
 import war_store as stock
-from cogs.war import WarCog
+from cogs.war import WarCog, depot_choices
 from cogs.war_share import ShareEstimate, message_payload
 from war_display import duration, quantity
 from war_planner import MAX_DEPOT_ITEMS, Packing, WarRules, block_shipment, defence_transfer, delivery_time, estimate, pack, plan_transport, stock_quantity
 
 
 def response_text(call):
-    return (call.args[0] if call.args and call.args[0] is not None
-            else call.kwargs.get("content") or call.kwargs["embed"].description)
+    embed = call.kwargs.get("embed")
+    if embed:
+        fields = [f"{f.name}: {f.value}" for f in embed.fields]
+        return "\n".join(t for t in [embed.description,embed.title,*fields] if t)
+    return call.args[0] if call.args else call.kwargs["content"]
 
 
 class Estimates(unittest.TestCase):
@@ -214,6 +217,32 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_depot_changes(self):
         await check_atomic_depot_changes(self, self.guild)
 
+    async def test_depot_directory_and_autocomplete_scope(self):
+        for name in ("A", "B", "C", "D%"):
+            await stock.set_stock(self.guild,name,logs=1)
+        await stock.set_stock(self.guild+1,"Other%",logs=99)
+        self.assertEqual([c.value for c in await depot_choices(self.admin,"%")],["D%"])
+        await self.cog.stock_list.callback(self.cog,self.admin)
+        first = self.admin.followup.send.await_args.kwargs["view"]
+        visitor = SimpleNamespace(**(vars(self.admin) | {"user": SimpleNamespace(id=43)}))
+        await first.next_page.callback(visitor)
+        self.admin.edit_original_response.assert_not_awaited()
+        await first.next_page.callback(self.admin)
+        second = self.admin.edit_original_response.await_args.kwargs["view"]
+        pick = next(c for c in second.children if hasattr(c,"options"))
+        self.assertEqual([o.label for o in pick.options], ["D%"])
+        pick._values = ["0"]
+        await pick.callback(self.admin)
+        detail = self.admin.edit_original_response.await_args.kwargs["view"]
+        await stock.adjust_stock(self.guild,"D%",logs=2)
+        await detail.refresh.callback(self.admin)
+        refreshed = self.admin.edit_original_response.await_args.kwargs
+        self.assertEqual(next(f.value for f in refreshed["embed"].fields if f.name=="Logs"),"3 logs")
+        self.admin.permissions = discord.Permissions.none()
+        self.assertEqual(await depot_choices(self.admin,""),[])
+        await refreshed["view"].back.callback(self.admin)
+        self.assertIsNone(self.admin.edit_original_response.await_args.kwargs["embed"])
+
     async def test_stock_ledger_uses_container_units_for_each_depot_and_totals(self):
         await stock.set_stock(self.guild, "Keep", hay=12000, diamonds=31104, iron=15552, logs=65)
         await stock.set_stock(self.guild, "Outpost", hay=64, diamonds=576)
@@ -260,7 +289,7 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
         await self.cog.conquerable.callback(self.cog, self.admin, 2400, 5, location="Hidden Depot")
         before = response_text(self.admin.followup.send.await_args)
         self.assertIn("Insufficient supplies", before)
-        self.assertIn("Logs available: 2 logs · Short: 1 logs", before)
+        self.assertIn("Logs available: 2 logs · Short: 1 log", before)
         await self.cog.stock_add.callback(self.cog, self.admin, "Hidden Depot", logs="1 stack", diamonds="1 stack of blocks")
         await self.cog.stock_subtract.callback(self.cog, self.admin, "Hidden Depot", logs="63", diamonds="64 blocks")
         await self.cog.conquerable.callback(self.cog, self.admin, 2400, 5, location="Hidden Depot")
@@ -402,6 +431,10 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
             await command.callback(self.cog, self.admin, *args, **kwargs)
             call = self.admin.followup.send.await_args
             private = response_text(call)
+            embed = call.kwargs["embed"]
+            self.assertLessEqual(len(embed),6000)
+            for field in embed.fields:
+                self.assertLessEqual(len(field.value.encode("utf-16-le"))//2,1024)
             public = call.kwargs["view"].text
             for text in (private, public):
                 payload = message_payload(text)
