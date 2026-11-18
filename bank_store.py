@@ -258,11 +258,10 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
         await conn.execute("UPDATE lands SET chunks=chunks+? WHERE id=? AND guild_id=?", (blocks, land["id"], guild))
         await conn.execute("INSERT INTO purchases (land_id,type,price_paid,purchased_at) VALUES (?,?,?,?)", (land["id"], kind, total, at.isoformat()))
         note = f"{kind.title()} claim: {blocks} block(s) x {unit} ems = {total} ems; {'bank paid' if payment == 'bank' else 'manual payment'}"
-        await conn.execute("INSERT INTO block_ledger (land_id,guild_id,type,blocks,note,recorded_by,created_at) VALUES (?,?,'owed',?,?,?,?)",
-                           (land["id"], guild, blocks, note, actor, at.isoformat()))
+        owed_entry_id = await db.record_ledger_entry(conn,land["id"],guild,"owed",blocks,note,actor,at)
         receipt = dict(land_id=land["id"], land_name=land["name"], blocks=blocks, chunks=land["chunks"] + blocks,
                        unit_price=unit, total=total, payment=payment, balance=after, kind=kind, banner=banner,
-                       sale_result=total-blocks*full_price, released_blocks=released)
+                       sale_result=total-blocks*full_price, released_blocks=released, owed_entry_id=owed_entry_id)
         result = await _record(conn, guild, actor, request_id, f"claim-{kind}", note, receipt, entries)
         await banner_account.record_sale(conn, guild, week, "checkout", result["operation_id"], kind,
                                          blocks, full_price, total, payment, released=released)

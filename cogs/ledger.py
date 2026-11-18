@@ -156,8 +156,8 @@ async def ledger_report(interaction, page, selection):
         embed.add_field(name=clip(discord.utils.escape_markdown(land["land_name"]), 256), value=line, inline=False)
     if not rows:
         embed.description = "No settlements recorded. Register a settlement with `/land create`."
-    embed.set_footer(text=f"Page {page}/{pages} · Bank paid means debited. Manual payments stay due until /banner create. "
-                          "/ledger deliver records the handover.")
+    embed.set_footer(text=f"Page {page}/{pages} · Admins use /banner handover for delivery with cash, "
+                          "or /banner create to settle a delivery already recorded.")
     return embed, ReportView(interaction, ledger_report, page, pages, prompt="Open a settlement",
                              choices=[(land["land_id"], land["land_name"]) for land in rows])
 
@@ -224,7 +224,7 @@ class LedgerCog(commands.GroupCog, name="ledger"):
     @app_commands.describe(
         land_name="The land that was delivered to",
         blocks="How many blocks were delivered (default: 1)",
-        note="Optional note (e.g. 'delivered on 28/09, 150 ems collected')",
+        note="Optional delivery note. Admins can confirm a cash exchange with /banner handover.",
     )
     @app_commands.guild_only()
     @app_commands.autocomplete(land_name=settlement_choices)

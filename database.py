@@ -1139,26 +1139,25 @@ async def get_rotation_offers_today(guild_id: int, date_str: str) -> list[dict]:
 
 # ── Block Ledger helpers ───────────────────────────────────────────────
 
+async def record_ledger_entry(conn, land_id, guild_id, kind, blocks, note, actor, at):
+    row = await conn.execute_returning_one(
+        "INSERT INTO block_ledger (land_id,guild_id,type,blocks,note,recorded_by,created_at) "
+        "VALUES (?,?,?,?,?,?,?) RETURNING id", (land_id,guild_id,kind,blocks,note,actor,at.isoformat()))
+    return row["id"]
+
+
 async def add_ledger_owed(land_id: int, guild_id: int, blocks: int, note: str = None, recorded_by: int = None):
     """Record that a land is owed N blocks (e.g. rotation accepted)."""
-    now = datetime.now(timezone.utc).isoformat()
-    async with DBConnection() as conn:
-        await conn.execute(
-            "INSERT INTO block_ledger (land_id, guild_id, type, blocks, note, recorded_by, created_at) "
-            "VALUES (?, ?, 'owed', ?, ?, ?, ?)",
-            (land_id, guild_id, blocks, note, recorded_by, now),
-        )
+    import bank_store
+    async with bank_store.write(guild_id) as conn:
+        await record_ledger_entry(conn,land_id,guild_id,"owed",blocks,note,recorded_by,bank_store.now())
 
 
 async def add_ledger_delivered(land_id: int, guild_id: int, blocks: int, note: str = None, recorded_by: int = None):
     """Record that N blocks were delivered to a land."""
-    now = datetime.now(timezone.utc).isoformat()
-    async with DBConnection() as conn:
-        await conn.execute(
-            "INSERT INTO block_ledger (land_id, guild_id, type, blocks, note, recorded_by, created_at) "
-            "VALUES (?, ?, 'delivered', ?, ?, ?, ?)",
-            (land_id, guild_id, blocks, note, recorded_by, now),
-        )
+    import bank_store
+    async with bank_store.write(guild_id) as conn:
+        await record_ledger_entry(conn,land_id,guild_id,"delivered",blocks,note,recorded_by,bank_store.now())
 
 
 async def get_ledger_balance(land_id: int) -> dict:
