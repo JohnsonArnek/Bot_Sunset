@@ -120,7 +120,8 @@ weekly liability a second time.
 | `/banner status land_name:Coppercross` | Owner/officers read the land's creation backlog and liabilities |
 | `/banner status` | Administrator sees all tracked purchases and total liabilities |
 | `/banner show purchase_id:123` | Fixed cost split and recent creation records for a purchase receipt |
-| `/banner handover purchase_id:123 blocks:2` | Administrator records delivery of two banners, confirms cash received and settles their creation cost in one transaction. The quantity defaults to one |
+| `/ledger deliver land_name:Coppercross blocks:2` | Record two banners delivered. The quantity defaults to one |
+| `/ledger deliver land_name:Coppercross blocks:2 cash_receipt:123` | Administrator confirms cash received for purchase #123, records both banners delivered and settles their creation cost |
 | `/banner create purchase_id:123 blocks:1 reason:Crafted` | Administrator records actual creation and debits bank funds |
 | `/banner create purchase_id:123 blocks:1 reason:Cash received and spent land_payment:physical` | Administrator confirms physical payment of the unpaid land share; treasury funds only its fixed subsidy |
 | `/banner cost amount:37` | Administrator sets the creation cost and full sale price. Omit the amount to read it |
@@ -137,7 +138,9 @@ credits 19. Physical confirmation means the full payment was received, including
 the premium. Never also deposit those same emeralds as new bank funds.
 
 When the buyer hands over the emeralds and takes the banners in the same visit,
-use `/banner handover` once for the quantity exchanged. A treasury shortage
+use `/ledger deliver` once for the quantity exchanged. Choose the settlement,
+then select its purchase in the optional `cash_receipt` field. The suggestions
+show the unpaid quantity and emerald price per banner. A treasury shortage
 leaves both delivery and payment open. For a delivery already entered in the
 ledger, use `/banner create land_payment:physical` once the cash is received.
 Older deliveries identify only the settlement. If they could already cover the
@@ -157,7 +160,7 @@ rewrite them. Creation records and obligations survive land deletion.
 **Bank paid** counts banners paid at checkout or debited from the settlement
 bank at creation. **Manual payment due** counts the banners and emeralds still
 owed by the settlement, including any premium. **Physical payment confirmed**
-counts the quantity an administrator settled with `/banner handover` or `/banner create land_payment:physical`.
+counts banners settled at delivery using `cash_receipt` or through `/banner create land_payment:physical`.
 Free banners have a zero settlement liability. Payment counts include delivered banners.
 
 For example, two manual banners at 7 ems each leave 14 ems to collect, even

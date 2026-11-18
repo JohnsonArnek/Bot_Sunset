@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ import banner_store as banners
 import banner_account as public
 from cogs.bank import BankCog
 from cogs.banners import BannerCog
-from cogs.ledger import LedgerCog, land_status, settlement_choices
+from cogs.ledger import LedgerCog, cash_receipt_choices, land_status, settlement_choices
 from test_bank import AT, BankContract, interaction
 
 
@@ -42,7 +43,27 @@ class BannerContract:
 
     async def handover(self, receipt, blocks=1, request_id=10):
         return await banners.create(self.guild,900,receipt["operation_id"],blocks,"Cash received",admin=True,
-                                    request_id=request_id,land_payment="physical",handover=True)
+                                    request_id=request_id,land_payment="physical",delivery_land_id=receipt["land_id"])
+
+    async def test_cash_receipt_is_scoped_to_selected_land_and_retries(self):
+        land, receipt = await self.purchase(chunks=26)
+        other = await self.land(owner=20,name="Elsewhere")
+        await self.approval(other)
+        other_receipt = await bank.buy_claim(self.guild,20,request_id=3)
+        choices = await banners.unpaid_receipts(self.guild,"TEST KEEP","",admin=True)
+        self.assertEqual(choices,[dict(id=receipt["operation_id"],unpaid=1,sale_unit=37)])
+        self.assertFalse(await banners.unpaid_receipts(self.guild+1,"Test Keep","",admin=True))
+        self.assertFalse(await banners.unpaid_receipts(self.guild,"Test Keep","",admin=False))
+        for purchase,wrong_land in ((other_receipt,land),(receipt,other)):
+            with self.assertRaisesRegex(ValueError,"different settlement"):
+                await banners.create(self.guild,900,purchase["operation_id"],1,"Cash received",admin=True,
+                                     request_id=10,land_payment="physical",delivery_land_id=wrong_land["id"])
+        await self.handover(receipt)
+        with self.assertRaisesRegex(ValueError,"different transaction"):
+            await banners.create(self.guild,900,receipt["operation_id"],1,"Cash received",admin=True,
+                                 request_id=10,land_payment="physical",delivery_land_id=other["id"])
+        self.assertFalse(await banners.unpaid_receipts(self.guild,"Test Keep","",admin=True))
+        self.assertEqual((await db.get_ledger_balance(other["id"]))["outstanding"],1)
 
     async def remove_delivery_link_from_receipt(self, purchase_id):
         # Simulate a checkout stored before the bot linked receipts to obligations.
@@ -135,7 +156,7 @@ class BannerContract:
         offer = await db.create_rotation_offer(self.guild,land["id"])
         await public.accept_rotation(self.guild,offer,land["id"],2,7,37,900)
         batch, = (await banners.status(self.guild,900,admin=True))["batches"]
-        receipt = {"operation_id":batch["id"]}
+        receipt = {"operation_id":batch["id"],"land_id":land["id"]}
         await self.remove_delivery_link_from_receipt(batch["id"])
         await self.deposit(60,request_id=3,treasury=True)
         await self.create(receipt,land_payment="physical")
@@ -143,7 +164,7 @@ class BannerContract:
             await self.handover(receipt)
         with self.assertRaisesRegex(ValueError,"No tracked"):
             await banners.create(self.guild+1,900,batch["id"],1,"Cash received",admin=True,request_id=11,
-                                 land_payment="physical",handover=True)
+                                 land_payment="physical",delivery_land_id=land["id"])
         await self.handover(receipt,request_id=11)
         self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],1)
         self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],0)
@@ -446,15 +467,33 @@ class BannerSQLite(BannerContract,unittest.IsolatedAsyncioTestCase):
         self.assertTrue(i.followup.send.await_args.kwargs["ephemeral"])
         await cog.create.callback(cog,i,r["operation_id"],1,"Unapproved")
         self.assertIn("Only Discord administrators",i.followup.send.await_args.kwargs["content"])
-        await cog.handover.callback(cog,i,r["operation_id"])
-        self.assertIn("Only Discord administrators",i.followup.send.await_args.kwargs["content"])
         self.assertEqual((await self.totals())["pending"],1)
+
+    async def test_deliver_optional_cash_receipt_and_notes(self):
+        land,r=await self.purchase(blocks=2)
+        cog = LedgerCog(None)
+        owner = interaction(self.guild)
+        owner.user.display_name = "Owner"
+        await cog.ledger_deliver.callback(cog,owner,"Test Keep",cash_receipt=r["operation_id"])
+        self.assertIn("Only Discord administrators",owner.followup.send.await_args.kwargs["content"])
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],2)
+        with patch("cogs.ledger._is_staff",return_value=False):
+            await cog.ledger_deliver.callback(cog,owner,"Test Keep",note="Paid on Tuesday")
+        self.assertFalse(owner.response.defer.await_args.kwargs["ephemeral"])
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],14)
         await self.deposit(30,request_id=3,treasury=True)
         admin = interaction(self.guild,admin=True)
-        await cog.handover.callback(cog,admin,r["operation_id"])
+        admin.namespace = SimpleNamespace(land_name="Test Keep")
+        self.assertEqual([c.value for c in await cash_receipt_choices(admin,"")],[r["operation_id"]])
+        self.assertEqual(await cash_receipt_choices(owner,""),[])
+        await cog.ledger_deliver.callback(cog,admin,"Test Keep",note="At east gate",cash_receipt=r["operation_id"])
+        admin.response.defer.assert_awaited_once_with(ephemeral=True)
         reply = admin.followup.send.await_args.kwargs
         self.assertTrue(reply["ephemeral"])
         self.assertIn("**7 ems**",reply["content"])
+        self.assertIn("At east gate",(await db.get_ledger_history(land["id"]))[0]["note"])
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],0)
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],7)
 
     async def test_public_command_publishes_only_aggregate_figures(self):
         await self.purchase(payment="bank", funds=20)

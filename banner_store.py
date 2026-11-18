@@ -220,6 +220,19 @@ async def show(guild, actor, purchase_id, *, admin):
         return row | dict(history=history)
 
 
+async def unpaid_receipts(guild, land_name, prefix, *, admin):
+    """Suggest manual purchases whose settlement still owes emeralds."""
+    if not admin or not land_name or (prefix and not (prefix.isascii() and prefix.isdecimal())):
+        return []
+    terms = batch_query() + (" JOIN lands l ON l.guild_id=b.guild_id AND l.id=a.subject_id "
+                             "WHERE b.guild_id=? AND LOWER(l.name)=LOWER(?) AND CAST(b.id AS TEXT) LIKE ?")
+    async with db.DBConnection() as conn:
+        return await conn.fetchall(
+            f"SELECT id,blocks-created AS unpaid,sale_unit FROM ({terms}) purchases "
+            "WHERE payment='manual' AND sale_unit>0 AND sale_unit=land_unit+premium_unit AND blocks>created "
+            "ORDER BY id DESC LIMIT 25", (guild,land_name,prefix+"%"))
+
+
 async def handover_available(conn, guild, row):
     """Count banners on this receipt that the delivery ledger still clearly owes."""
     lock = " FOR KEY SHARE" if db.IS_POSTGRES else ""
@@ -267,13 +280,15 @@ async def handover_available(conn, guild, row):
     return max(0, int(min(counts["balance"], receipt_balance)))
 
 
-async def create(guild, actor, purchase_id, blocks, reason, *, admin, request_id, land_payment="bank", handover=False):
+async def create(guild, actor, purchase_id, blocks, reason, *, admin, request_id, land_payment="bank",
+                 delivery_land_id=None, delivery_note=None):
     bank.require_admin(admin)
     if type(blocks) is not int or not 1 <= blocks <= 2_000_000_000:
         raise ValueError("Choose a positive whole number of banners to mark created.")
     reason = reason.strip()
     if not 1 <= len(reason) <= 250 or land_payment not in ("bank", "physical"):
         raise ValueError("Supply a 1–250 character reason and choose bank or physical land payment.")
+    handover = delivery_land_id is not None
     if handover and land_payment != "physical":
         raise ValueError("A cash handover requires physical payment.")
     receipt_type = "banner-handover" if handover else "banner-creation"
@@ -281,19 +296,22 @@ async def create(guild, actor, purchase_id, blocks, reason, *, admin, request_id
         prior = await bank._replay(conn,guild,actor,request_id,"withdraw")
         if prior:
             if any(prior.get(k) != v for k,v in dict(receipt_type=receipt_type,purchase_id=purchase_id,
-                    blocks=blocks,reason=reason,land_payment=land_payment).items()):
+                    blocks=blocks,reason=reason,land_payment=land_payment,
+                    delivery_land_id=delivery_land_id,delivery_note=delivery_note).items()):
                 raise ValueError("This interaction already recorded a different transaction.")
             return prior
         row = await conn.fetchone(batch_query()+"WHERE b.guild_id=? AND b.id=?", (guild,purchase_id))
         if not row:
             raise ValueError("No tracked banner purchase with that receipt ID exists on this server.")
+        if handover and delivery_land_id != row["land_id"]:
+            raise ValueError("This cash receipt belongs to a different settlement. Choose a receipt for the selected land.")
         if handover and (row["payment"] != "manual" or row["sale_unit"] == 0):
-            raise ValueError("A cash handover requires a manual purchase with emeralds due. Use /ledger deliver for delivery only.")
+            raise ValueError("Choose a manual purchase with emeralds due, or leave cash_receipt blank to record delivery only.")
         remaining = row["blocks"]-row["created"]
         if blocks > remaining:
             if handover:
                 raise ValueError(f"Only {remaining:,} banners still have a payment due on this purchase. "
-                                 "Use /ledger deliver if a settled banner still needs delivery.")
+                                 "Leave cash_receipt blank if a settled banner still needs delivery.")
             raise ValueError(f"Only {remaining:,} banners remain uncreated for this purchase. Nothing was debited.")
         if row["prepaid_unit"] and land_payment == "physical":
             raise ValueError("This land already paid by bank transfer. Use bank to spend that prepaid contribution once.")
@@ -330,9 +348,12 @@ async def create(guild, actor, purchase_id, blocks, reason, *, admin, request_id
         activity = "Banner handover" if handover else "Banner creation"
         journal_note = f"{activity} for purchase #{purchase_id}: {reason}"
         if handover:
+            receipt.update(delivery_land_id=delivery_land_id,delivery_note=delivery_note)
+            ledger_note = f"Cash handover for purchase #{purchase_id} · {physical:,} ems received"
+            if delivery_note:
+                ledger_note += f"\n{delivery_note}"
             receipt["delivery_entry_id"] = await db.record_ledger_entry(
-                conn,row["land_id"],guild,"delivered",blocks,
-                f"Cash handover for purchase #{purchase_id} · {physical:,} ems received",actor,bank.now())
+                conn,delivery_land_id,guild,"delivered",blocks,ledger_note,actor,bank.now())
         result = await bank._record(conn,guild,actor,request_id,"withdraw",journal_note,receipt,entries)
         await conn.execute(f"INSERT INTO {table('creations')} (operation_id,guild_id,batch_id,blocks,physical_land_payment) VALUES (?,?,?,?,?)",
                            (result["operation_id"],guild,purchase_id,blocks,physical))

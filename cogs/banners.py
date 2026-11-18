@@ -71,7 +71,7 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
             lines.append(f"Manual reserve premiums due to the treasury: **{s['premium_due']:,} ems**.")
         if not result["batches"]:
             lines.append("No tracked purchases on this page.")
-        lines.append("Use /banner show for receipt details. Admins can record delivery and cash together with /banner handover.")
+        lines.append("Use /banner show for receipt details. To confirm cash at pickup, select cash_receipt in /ledger deliver.")
         await reply(interaction,"\n\n".join(lines))
 
     @app_commands.command(description="Show a claim purchase's fixed creation split and recent creation records")
@@ -107,24 +107,6 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
                     f"Bank changes: land {-r['land_debit']:+,} · treasury {-r['treasury_debit']:+,} ems\n"
                     f"Confirmed physical land payment: {r['physical']:,} ems\n"
                     f"{r['remaining']:,} banners still to create. If delivery is still due, record it with /ledger deliver.")
-
-    @app_commands.command(description="[Admin] Record delivery and confirm the physical emerald payment for a manual purchase")
-    @app_commands.describe(purchase_id="Purchase receipt ID from /banner status",
-                           blocks="Number handed over for the full cash price in this exchange (default 1)")
-    async def handover(self, interaction: discord.Interaction, purchase_id: AccountID,
-                       blocks: app_commands.Range[int,1,2_000_000_000] = 1):
-        try:
-            r = await store.create(interaction.guild_id,interaction.user.id,purchase_id,blocks,
-                                   "Banners delivered and physical emeralds received",admin=interaction.permissions.administrator,
-                                   request_id=interaction.id,land_payment="physical",handover=True)
-        except ValueError as exc:
-            return await reply(interaction,str(exc))
-        noun = "banner" if r["blocks"] == 1 else "banners"
-        await reply(interaction,f"**{'Handover already recorded' if r['duplicate'] else 'Handover recorded'} · purchase #{purchase_id}**\n"
-                    f"{discord.utils.escape_markdown(r['land_name'])} received **{r['blocks']:,} {noun}**. "
-                    f"Physical payment confirmed: **{r['physical']:,} ems**.\n"
-                    f"Creation cost settled: {r['total']:,} ems · treasury change: {-r['treasury_debit']:+,} ems.\n"
-                    f"Still to settle on this purchase: {r['remaining']:,}.")
 
     @app_commands.command(description="[Admin] Read or change the creation cost per banner for future purchases")
     async def cost(self, interaction: discord.Interaction, amount: Amount = None):
