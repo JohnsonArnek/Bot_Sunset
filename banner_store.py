@@ -220,6 +220,11 @@ async def show(guild, actor, purchase_id, *, admin):
         return row | dict(history=history)
 
 
+def unpaid_purchase_query(terms):
+    return (f"SELECT purchases.*,blocks-created AS unpaid FROM ({terms}) purchases "
+            "WHERE payment='manual' AND sale_unit>0 AND sale_unit=land_unit+premium_unit AND blocks>created ")
+
+
 async def unpaid_receipts(guild, land_name, prefix, *, admin):
     """Suggest manual purchases whose settlement still owes emeralds."""
     if not admin or not land_name or (prefix and not (prefix.isascii() and prefix.isdecimal())):
@@ -227,10 +232,24 @@ async def unpaid_receipts(guild, land_name, prefix, *, admin):
     terms = batch_query() + (" JOIN lands l ON l.guild_id=b.guild_id AND l.id=a.subject_id "
                              "WHERE b.guild_id=? AND LOWER(l.name)=LOWER(?) AND CAST(b.id AS TEXT) LIKE ?")
     async with db.DBConnection() as conn:
-        return await conn.fetchall(
-            f"SELECT id,blocks-created AS unpaid,sale_unit FROM ({terms}) purchases "
-            "WHERE payment='manual' AND sale_unit>0 AND sale_unit=land_unit+premium_unit AND blocks>created "
-            "ORDER BY id DESC LIMIT 25", (guild,land_name,prefix+"%"))
+        return await conn.fetchall(f"SELECT id,unpaid,sale_unit FROM ({unpaid_purchase_query(terms)}) due "
+                                   "ORDER BY id DESC LIMIT 25", (guild,land_name,prefix+"%"))
+
+
+async def ledger_receipts(guild, land, page, selected_id):
+    """Return the page of unpaid receipts and the selected receipt's pickup limit."""
+    query = unpaid_purchase_query(batch_query()+" WHERE b.guild_id=? AND a.subject_id=?")
+    async with bank.write(guild) as conn:
+        params = (guild,land["land_id"])
+        count = await conn.fetchone(f"SELECT COUNT(*) AS n FROM ({query}) due", params)
+        pages = max(1,(count["n"]+9)//10)
+        page = min(max(1,page),pages)
+        rows = await conn.fetchall(query+"ORDER BY id DESC LIMIT 10 OFFSET ?", params+((page-1)*10,))
+        selected = next((r for r in rows if r["id"] == selected_id), rows[0] if rows else None)
+        pickup = 0
+        if selected and land["owner_id"] is not None and land["outstanding"] > 0:
+            pickup = min(selected["unpaid"], await handover_available(conn,guild,selected))
+        return rows, selected, pickup, page, pages
 
 
 async def handover_available(conn, guild, row):
@@ -281,7 +300,7 @@ async def handover_available(conn, guild, row):
 
 
 async def create(guild, actor, purchase_id, blocks, reason, *, admin, request_id, land_payment="bank",
-                 delivery_land_id=None, delivery_note=None):
+                 delivery_land_id=None, delivery_note=None, expected_created=None, expected_revision=None):
     bank.require_admin(admin)
     if type(blocks) is not int or not 1 <= blocks <= 2_000_000_000:
         raise ValueError("Choose a positive whole number of banners to mark created.")
@@ -303,6 +322,8 @@ async def create(guild, actor, purchase_id, blocks, reason, *, admin, request_id
         row = await conn.fetchone(batch_query()+"WHERE b.guild_id=? AND b.id=?", (guild,purchase_id))
         if not row:
             raise ValueError("No tracked banner purchase with that receipt ID exists on this server.")
+        if expected_created is not None and row["created"] != expected_created:
+            raise ValueError("This purchase has changed. Refresh the settlement to see the payment still due.")
         if handover and delivery_land_id != row["land_id"]:
             raise ValueError("This cash receipt belongs to a different settlement. Choose a receipt for the selected land.")
         if handover and (row["payment"] != "manual" or row["sale_unit"] == 0):
@@ -316,6 +337,8 @@ async def create(guild, actor, purchase_id, blocks, reason, *, admin, request_id
         if row["prepaid_unit"] and land_payment == "physical":
             raise ValueError("This land already paid by bank transfer. Use bank to spend that prepaid contribution once.")
         if handover:
+            if expected_revision is not None:
+                await db.check_delivery_snapshot(conn,guild,delivery_land_id,blocks,expected_revision)
             if row["sale_unit"] != row["land_unit"] + row["premium_unit"]:
                 raise ValueError("This older receipt has an amount outside its funding terms. Review /banner show before settling it.")
             available = await handover_available(conn,guild,row)

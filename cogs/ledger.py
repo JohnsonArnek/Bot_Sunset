@@ -19,6 +19,7 @@ import database as db
 import banner_store
 from cogs.bank import AccountID, reply
 from cogs.banners import payment_text
+from cogs.ledger_actions import SettlementActions, SettlementSelection
 from cogs.report_view import NO_MENTIONS, ReportView, clip
 
 
@@ -141,9 +142,31 @@ async def ledger_report(interaction, page, selection):
         raise PermissionError
     guild = interaction.guild_id
     if selection is not None:
-        rows = await db.get_all_ledger_status(guild, selection)
+        if isinstance(selection, int):
+            selection = SettlementSelection(selection)
+        rows = await db.get_all_ledger_status(guild, selection.land_id)
         if rows:
-            return await settlement_embed(rows[0]), ReportView(interaction, ledger_report, page, 1, selection=selection)
+            land = rows[0]
+            embed = await settlement_embed(land)
+            receipts, purchase, pickup, receipt_page, pages = [], None, 0, 1, 1
+            if interaction.permissions.administrator and land["payments"].get("due_blocks"):
+                receipts, purchase, pickup, receipt_page, pages = await banner_store.ledger_receipts(
+                    guild, land, selection.receipt_page, selection.receipt_id)
+            if purchase:
+                terms = f"{purchase['unpaid']:,} × {purchase['sale_unit']:,} = **{purchase['unpaid']*purchase['sale_unit']:,} ems due**"
+                if pickup:
+                    terms += f"\nUp to {pickup:,} eligible for pickup with cash."
+                elif land["owner_id"] is not None and land["outstanding"] == 0:
+                    terms += "\nAll deliveries recorded. Confirm cash when the emeralds arrive."
+                embed.add_field(name=f"Selected purchase #{purchase['id']}",value=terms,inline=False)
+            if purchase or land["outstanding"] > 0:
+                footer = ("Confirm cash to settle the creation cost for the quantity entered." if purchase else
+                          "Record delivery when the settlement receives its banners.")
+                if pages > 1:
+                    footer += f" · Receipts page {receipt_page}/{pages}"
+                embed.set_footer(text=footer)
+            return embed, SettlementActions(interaction, ledger_report, _is_staff, page, land,
+                                            receipts, purchase, pickup, receipt_page, pages)
     lands = await db.get_all_ledger_status(guild)
     pages = max(1, (len(lands)+4)//5)
     page = max(1, min(page, pages))
@@ -172,9 +195,8 @@ async def ledger_report(interaction, page, selection):
         embed.add_field(name=clip(discord.utils.escape_markdown(land["land_name"]), 256), value=line, inline=False)
     if not rows:
         embed.description = "No settlements recorded. Register a settlement with `/land create`."
-    embed.set_footer(text=f"Page {page}/{pages} · Admins select cash_receipt in /ledger deliver for cash at pickup, "
-                          "or /banner create to settle a delivery already recorded.")
-    return embed, ReportView(interaction, ledger_report, page, pages, prompt="Open a settlement",
+    embed.set_footer(text=f"Page {page}/{pages} · Open a settlement to record delivery or confirm payment.")
+    return embed, ReportView(interaction, ledger_report, page, pages, prompt="Choose a settlement for delivery or payment",
                              choices=[(land["land_id"], land["land_name"]) for land in rows])
 
 

@@ -114,7 +114,7 @@ weekly liability a second time.
 
 | Command | Purpose |
 | --- | --- |
-| `/ledger status` | Staff browse payment and delivery totals, then select a settlement for its breakdown and recent activity |
+| `/ledger status` | Staff select a settlement and record delivery. Administrators can select an unpaid purchase and confirm pickup with cash or payment alone |
 | `/ledger balance land_name:Coppercross` | Owner, officers or staff see that land's payments and deliveries |
 | `/ledger history land_name:Coppercross limit:25` | Browse the most recent delivery entries and their complete notes in private |
 | `/banner status land_name:Coppercross` | Owner/officers read the land's creation backlog and liabilities |
@@ -138,6 +138,13 @@ credits 19. Physical confirmation means the full payment was received, including
 the premium. Never also deposit those same emeralds as new bank funds.
 
 When the buyer hands over the emeralds and takes the banners in the same visit,
+staff can open the settlement in `/ledger status`. **Record delivery** updates
+its outstanding quantity. Administrators can use **Deliver and collect cash**
+for a pickup or **Confirm cash only** when the delivery is already recorded.
+The form starts at one banner and shows the selected purchase's price for cash
+actions. Submitting it updates the settlement report.
+
+For the slash-command shortcut,
 use `/ledger deliver` once for the quantity exchanged. Choose the settlement,
 then select its purchase in the optional `cash_receipt` field. The suggestions
 show the unpaid quantity and emerald price per banner. A treasury shortage
@@ -171,6 +178,10 @@ tracked independently.
 Private tables use the RLS-enabled `sunset_banners` schema alongside the bank.
 
 ## Public settlement libraries
+
+For a later library update, let readers select a catalogue from the list, browse
+its pages and open a book. Give library managers **Add book** and **Edit this
+book** actions that carry the selected catalogue and title into the form.
 
 Each registered settlement can list one public library with a name, location
 (coordinates/dimension or directions), description and a catalogue of books.

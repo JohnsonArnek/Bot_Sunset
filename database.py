@@ -1153,10 +1153,24 @@ async def add_ledger_owed(land_id: int, guild_id: int, blocks: int, note: str = 
         await record_ledger_entry(conn,land_id,guild_id,"owed",blocks,note,recorded_by,bank_store.now())
 
 
-async def add_ledger_delivered(land_id: int, guild_id: int, blocks: int, note: str = None, recorded_by: int = None):
+async def check_delivery_snapshot(conn, guild_id, land_id, blocks, revision):
+    row = await conn.fetchone(
+        "SELECT MAX(b.id) AS revision, SUM(CASE WHEN b.type='owed' THEN b.blocks ELSE -b.blocks END) AS outstanding "
+        "FROM lands l LEFT JOIN block_ledger b ON b.land_id=l.id AND b.guild_id=l.guild_id "
+        "WHERE l.guild_id=? AND l.id=? GROUP BY l.id", (guild_id,land_id))
+    if not row or (row["revision"] or 0) != revision:
+        raise ValueError("The delivery ledger has changed. Refresh the settlement before recording another delivery.")
+    if not 1 <= blocks <= (row["outstanding"] or 0):
+        raise ValueError("Choose a quantity within the banners still awaiting delivery.")
+
+
+async def add_ledger_delivered(land_id: int, guild_id: int, blocks: int, note: str = None, recorded_by: int = None,
+                               *, expected_revision=None):
     """Record that N blocks were delivered to a land."""
     import bank_store
     async with bank_store.write(guild_id) as conn:
+        if expected_revision is not None:
+            await check_delivery_snapshot(conn,guild_id,land_id,blocks,expected_revision)
         await record_ledger_entry(conn,land_id,guild_id,"delivered",blocks,note,recorded_by,bank_store.now())
 
 
@@ -1196,7 +1210,7 @@ async def get_all_ledger_status(guild_id: int, land_id: int = None) -> list[dict
     params = (guild_id, land_id) if land_id is not None else (guild_id,)
     async with bank_store.write(guild_id) as conn:
         rows = await conn.fetchall(
-            "SELECT l.id as land_id, l.name as land_name, l.owner_id, "
+            "SELECT l.id as land_id, l.name as land_name, l.owner_id, COALESCE(MAX(b.id),0) AS ledger_revision, "
             "COALESCE(SUM(CASE WHEN b.type = 'owed' THEN b.blocks ELSE 0 END), 0) as total_owed, "
             "COALESCE(SUM(CASE WHEN b.type = 'delivered' THEN b.blocks ELSE 0 END), 0) as total_delivered "
             "FROM lands l "

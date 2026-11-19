@@ -62,12 +62,20 @@ class ReportView(discord.ui.View):
         if not await self.interaction_check(interaction):
             return
         self.busy = True
-        new_view = None
         try:
             await interaction.response.defer()
+        except Exception:
+            self.busy = False
+            raise
+        await self.update_message(interaction, page, selection)
+
+    async def update_message(self, interaction, page, selection, notice=None):
+        """Replace an acknowledged report, optionally showing its action receipt."""
+        new_view = None
+        try:
             # Each renderer checks current access before reading the server's data.
             embed, new_view = await self.render(interaction, page, selection)
-            await interaction.edit_original_response(content=None, embed=embed, view=new_view, allowed_mentions=NO_MENTIONS)
+            await interaction.edit_original_response(content=notice, embed=embed, view=new_view, allowed_mentions=NO_MENTIONS)
         except Exception as exc:
             if new_view:
                 new_view.stop()
@@ -76,6 +84,8 @@ class ReportView(discord.ui.View):
                 message = "You no longer have access to this report."
             else:
                 log.warning("Report navigation failed (%s)", type(exc).__name__)
+                if notice:
+                    message = f"{notice}\nRun the command again to view the updated balance."
             try:
                 await interaction.edit_original_response(content=message, embed=None, view=None, allowed_mentions=NO_MENTIONS)
             except (discord.HTTPException, OSError, TimeoutError):
