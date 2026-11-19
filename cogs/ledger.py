@@ -16,7 +16,10 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
+import banner_store
+from cogs.bank import AccountID, reply
 from cogs.banners import payment_text
+from cogs.ledger_actions import SettlementActions, SettlementSelection
 from cogs.report_view import NO_MENTIONS, ReportView, clip
 
 
@@ -61,6 +64,20 @@ async def settlement_choices(interaction, current):
         logging.getLogger(__name__).warning("Settlement suggestions unavailable (%s)", type(exc).__name__)
         return []
     return [app_commands.Choice(name=r["name"], value=r["name"]) for r in rows if len(r["name"].encode("utf-16-le")) <= 200]
+
+
+async def cash_receipt_choices(interaction, current):
+    if interaction.guild_id is None or not interaction.permissions.administrator:
+        return []
+    try:
+        async with asyncio.timeout(2):
+            rows = await banner_store.unpaid_receipts(
+                interaction.guild_id,interaction.namespace.land_name,str(current or ""),admin=interaction.permissions.administrator)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Cash receipt suggestions unavailable (%s)", type(exc).__name__)
+        return []
+    return [app_commands.Choice(name=f"#{r['id']} · {r['unpaid']:,} unpaid · {r['sale_unit']:,} ems each", value=r["id"])
+            for r in rows]
 
 
 async def history_report(land_id, limit, interaction, page, selection):
@@ -125,9 +142,31 @@ async def ledger_report(interaction, page, selection):
         raise PermissionError
     guild = interaction.guild_id
     if selection is not None:
-        rows = await db.get_all_ledger_status(guild, selection)
+        if isinstance(selection, int):
+            selection = SettlementSelection(selection)
+        rows = await db.get_all_ledger_status(guild, selection.land_id)
         if rows:
-            return await settlement_embed(rows[0]), ReportView(interaction, ledger_report, page, 1, selection=selection)
+            land = rows[0]
+            embed = await settlement_embed(land)
+            receipts, purchase, pickup, receipt_page, pages = [], None, 0, 1, 1
+            if interaction.permissions.administrator and land["payments"].get("due_blocks"):
+                receipts, purchase, pickup, receipt_page, pages = await banner_store.ledger_receipts(
+                    guild, land, selection.receipt_page, selection.receipt_id)
+            if purchase:
+                terms = f"{purchase['unpaid']:,} × {purchase['sale_unit']:,} = **{purchase['unpaid']*purchase['sale_unit']:,} ems due**"
+                if pickup:
+                    terms += f"\nUp to {pickup:,} eligible for pickup with cash."
+                elif land["owner_id"] is not None and land["outstanding"] == 0:
+                    terms += "\nAll deliveries recorded. Confirm cash when the emeralds arrive."
+                embed.add_field(name=f"Selected purchase #{purchase['id']}",value=terms,inline=False)
+            if purchase or land["outstanding"] > 0:
+                footer = ("Confirm cash to settle the creation cost for the quantity entered." if purchase else
+                          "Record delivery when the settlement receives its banners.")
+                if pages > 1:
+                    footer += f" · Receipts page {receipt_page}/{pages}"
+                embed.set_footer(text=footer)
+            return embed, SettlementActions(interaction, ledger_report, _is_staff, page, land,
+                                            receipts, purchase, pickup, receipt_page, pages)
     lands = await db.get_all_ledger_status(guild)
     pages = max(1, (len(lands)+4)//5)
     page = max(1, min(page, pages))
@@ -156,9 +195,8 @@ async def ledger_report(interaction, page, selection):
         embed.add_field(name=clip(discord.utils.escape_markdown(land["land_name"]), 256), value=line, inline=False)
     if not rows:
         embed.description = "No settlements recorded. Register a settlement with `/land create`."
-    embed.set_footer(text=f"Page {page}/{pages} · Bank paid means debited. Manual payments stay due until /banner create. "
-                          "/ledger deliver records the handover.")
-    return embed, ReportView(interaction, ledger_report, page, pages, prompt="Open a settlement",
+    embed.set_footer(text=f"Page {page}/{pages} · Open a settlement to record delivery or confirm payment.")
+    return embed, ReportView(interaction, ledger_report, page, pages, prompt="Choose a settlement for delivery or payment",
                              choices=[(land["land_id"], land["land_name"]) for land in rows])
 
 
@@ -219,35 +257,52 @@ class LedgerCog(commands.GroupCog, name="ledger"):
 
     @app_commands.command(
         name="deliver",
-        description="Mark blocks as delivered to a land (clears their owed balance)",
+        description="Record banner delivery to a land. Admins can also confirm cash received at pickup.",
     )
     @app_commands.describe(
         land_name="The land that was delivered to",
         blocks="How many blocks were delivered (default: 1)",
-        note="Optional note (e.g. 'delivered on 28/09, 150 ems collected')",
+        note="Optional note for the settlement's delivery history",
+        cash_receipt="[Admin] Select a purchase to confirm its cash payment. Leave blank for delivery only.",
     )
     @app_commands.guild_only()
-    @app_commands.autocomplete(land_name=settlement_choices)
+    @app_commands.autocomplete(land_name=settlement_choices, cash_receipt=cash_receipt_choices)
     async def ledger_deliver(
         self,
         interaction: discord.Interaction,
         land_name: str,
         blocks: int = 1,
         note: str = None,
+        cash_receipt: AccountID = None,
     ):
-        await interaction.response.defer()
+        cash = cash_receipt is not None
+        await interaction.response.defer(ephemeral=cash)
+        if cash and not interaction.permissions.administrator:
+            return await reply(interaction,"Only Discord administrators can confirm physical emerald payments.")
 
-        is_staff = await _is_staff(interaction)
         land = await db.get_land_by_name(interaction.guild_id, land_name)
         if not land:
             return await interaction.followup.send(
                 f"❌ Land **{land_name}** not found.", ephemeral=True
             )
 
-        # Allow: staff, land owner, or land officers
-        officer_ids = await db.get_officers(land["id"])
-        allowed = is_staff or interaction.user.id == land["owner_id"] or interaction.user.id in officer_ids
-        if not allowed:
+        if cash:
+            try:
+                receipt = await banner_store.create(
+                    interaction.guild_id, interaction.user.id, cash_receipt, blocks, "Physical emeralds received at pickup",
+                    admin=interaction.permissions.administrator, request_id=interaction.id, land_payment="physical",
+                    delivery_land_id=land["id"], delivery_note=note)
+            except ValueError as exc:
+                return await reply(interaction,str(exc))
+            status = "Delivery already recorded" if receipt["duplicate"] else "Delivery and payment recorded"
+            noun = "banner" if blocks == 1 else "banners"
+            return await reply(interaction,f"**{status} · purchase #{cash_receipt}**\n"
+                               f"{discord.utils.escape_markdown(land['name'])} received **{blocks:,} {noun}**. "
+                               f"Physical payment confirmed: **{receipt['physical']:,} ems**.\n"
+                               f"Creation cost settled: {receipt['total']:,} ems · treasury change: {-receipt['treasury_debit']:+,} ems.\n"
+                               f"Still to settle on this purchase: {receipt['remaining']:,}.")
+
+        if not await can_read_land(interaction, land):
             return await interaction.followup.send(
                 "🔒 Only the land owner, their officers, or staff can mark deliveries.", ephemeral=True
             )

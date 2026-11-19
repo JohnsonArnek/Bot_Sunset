@@ -71,7 +71,7 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
             lines.append(f"Manual reserve premiums due to the treasury: **{s['premium_due']:,} ems**.")
         if not result["batches"]:
             lines.append("No tracked purchases on this page.")
-        lines.append("Use /banner show for details. Creation is separate from delivery; /ledger deliver does not spend money.")
+        lines.append("Use /banner show for receipt details. To confirm cash at pickup, select cash_receipt in /ledger deliver.")
         await reply(interaction,"\n\n".join(lines))
 
     @app_commands.command(description="Show a claim purchase's fixed creation split and recent creation records")
@@ -106,7 +106,7 @@ class BannerCog(commands.GroupCog, name="banner", group_description="Track claim
                     f"Cost split: land {r['land_share']:,} + central budget {r['central_share']:,} ems\n"
                     f"Bank changes: land {-r['land_debit']:+,} · treasury {-r['treasury_debit']:+,} ems\n"
                     f"Confirmed physical land payment: {r['physical']:,} ems\n"
-                    f"{r['remaining']:,} banners still to create. Record delivery separately with /ledger deliver.")
+                    f"{r['remaining']:,} banners still to create. If delivery is still due, record it with /ledger deliver.")
 
     @app_commands.command(description="[Admin] Read or change the creation cost per banner for future purchases")
     async def cost(self, interaction: discord.Interaction, amount: Amount = None):

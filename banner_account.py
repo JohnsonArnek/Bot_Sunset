@@ -91,7 +91,8 @@ async def weekly_production(guild):
         return row["produced"]
 
 
-async def record_allocation_sale(conn, guild, land_id, kind, price, blocks, at, *, grant_id=None, cost=None, actor=None):
+async def record_allocation_sale(conn, guild, land_id, kind, price, blocks, at, *, grant_id=None, cost=None, actor=None,
+                                 owed_entry_id=None):
     week = await ensure_week(conn, guild, at)
     cost = await banners.unit_cost(conn, guild) if cost is None else cost
     for _ in range(blocks):
@@ -103,7 +104,7 @@ async def record_allocation_sale(conn, guild, land_id, kind, price, blocks, at, 
         land = await conn.fetchone("SELECT name FROM lands WHERE guild_id=? AND id=?", (guild,land_id))
         land_unit = min(price, cost)
         receipt = dict(land_id=land_id, land_name=land["name"], blocks=blocks, kind=kind, payment="manual",
-                       unit_price=price, total=price*blocks, premium_unit=price-land_unit,
+                       unit_price=price, total=price*blocks, premium_unit=price-land_unit, owed_entry_id=owed_entry_id,
                        banner=dict(unit_cost=cost, land_unit=land_unit, prepaid_unit=0))
         # Discord request IDs are positive. Scheduled allocations use the negative purchase ID.
         action = "claim-reserve" if kind == "auction" else "claim-normal"
@@ -119,10 +120,11 @@ async def allocate(conn, guild, land_id, kind, price, blocks, *, actor, note=Non
         "UPDATE lands SET chunks=chunks+? WHERE guild_id=? AND id=? RETURNING chunks", (blocks, guild, land_id))
     if not land:
         raise ValueError("This settlement no longer exists.")
-    await record_allocation_sale(conn,guild,land_id,kind,price,blocks,at,grant_id=grant_id,cost=cost,actor=actor)
+    owed_entry_id = None
     if note is not None:
-        await conn.execute("INSERT INTO block_ledger (land_id,guild_id,type,blocks,note,recorded_by,created_at) "
-                           "VALUES (?,?,'owed',?,?,?,?)", (land_id, guild, blocks, note, actor, at.isoformat()))
+        owed_entry_id = await db.record_ledger_entry(conn,land_id,guild,"owed",blocks,note,actor,at)
+    await record_allocation_sale(conn,guild,land_id,kind,price,blocks,at,grant_id=grant_id,cost=cost,actor=actor,
+                                 owed_entry_id=owed_entry_id)
     return land["chunks"]
 
 

@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ import banner_store as banners
 import banner_account as public
 from cogs.bank import BankCog
 from cogs.banners import BannerCog
-from cogs.ledger import LedgerCog, land_status, settlement_choices
+from cogs.ledger import LedgerCog, cash_receipt_choices, land_status, ledger_report, settlement_choices
 from test_bank import AT, BankContract, interaction
 
 
@@ -39,6 +40,162 @@ class BannerContract:
 
     async def totals(self):
         return (await banners.status(self.guild,900,admin=True))["totals"]
+
+    async def handover(self, receipt, blocks=1, request_id=10):
+        return await banners.create(self.guild,900,receipt["operation_id"],blocks,"Cash received",admin=True,
+                                    request_id=request_id,land_payment="physical",delivery_land_id=receipt["land_id"])
+
+    async def test_cash_receipt_is_scoped_to_selected_land_and_retries(self):
+        land, receipt = await self.purchase(chunks=26)
+        other = await self.land(owner=20,name="Elsewhere")
+        await self.approval(other)
+        other_receipt = await bank.buy_claim(self.guild,20,request_id=3)
+        choices = await banners.unpaid_receipts(self.guild,"TEST KEEP","",admin=True)
+        self.assertEqual(choices,[dict(id=receipt["operation_id"],unpaid=1,sale_unit=37)])
+        self.assertFalse(await banners.unpaid_receipts(self.guild+1,"Test Keep","",admin=True))
+        self.assertFalse(await banners.unpaid_receipts(self.guild,"Test Keep","",admin=False))
+        for purchase,wrong_land in ((other_receipt,land),(receipt,other)):
+            with self.assertRaisesRegex(ValueError,"different settlement"):
+                await banners.create(self.guild,900,purchase["operation_id"],1,"Cash received",admin=True,
+                                     request_id=10,land_payment="physical",delivery_land_id=wrong_land["id"])
+        await self.handover(receipt)
+        with self.assertRaisesRegex(ValueError,"different transaction"):
+            await banners.create(self.guild,900,receipt["operation_id"],1,"Cash received",admin=True,
+                                 request_id=10,land_payment="physical",delivery_land_id=other["id"])
+        self.assertFalse(await banners.unpaid_receipts(self.guild,"Test Keep","",admin=True))
+        self.assertEqual((await db.get_ledger_balance(other["id"]))["outstanding"],1)
+
+    async def test_ledger_buttons_reject_stale_partial_exchanges(self):
+        land, r = await self.purchase(chunks=26,blocks=3)
+        current, = await db.get_all_ledger_status(self.guild,land["id"])
+        revision = current["ledger_revision"]
+        await db.add_ledger_delivered(land["id"],self.guild,1,expected_revision=revision)
+        with self.assertRaisesRegex(ValueError,"ledger has changed"):
+            await db.add_ledger_delivered(land["id"],self.guild,1,expected_revision=revision)
+        with self.assertRaisesRegex(ValueError,"ledger has changed"):
+            await banners.create(self.guild,900,r["operation_id"],1,"Collected",admin=True,request_id=31,
+                                 land_payment="physical",delivery_land_id=land["id"],expected_revision=revision)
+        args = (self.guild,900,r["operation_id"],1,"Collected")
+        await banners.create(*args,admin=True,request_id=32,land_payment="physical",expected_created=0)
+        with self.assertRaisesRegex(ValueError,"purchase has changed"):
+            await banners.create(*args,admin=True,request_id=33,land_payment="physical",expected_created=0)
+        current, = await db.get_all_ledger_status(self.guild,land["id"])
+        self.assertEqual((current["outstanding"],current["payments"]["due_ems"]),(2,74))
+
+    async def test_ledger_cash_buttons_follow_actual_delivery_capacity(self):
+        land, old = await self.purchase(chunks=26)
+        await db.add_ledger_delivered(land["id"],self.guild,1)
+        await db.update_reserve_blocks(self.guild,4)
+        reserve = await bank.buy_claim(self.guild,10,request_id=3,kind="reserve")
+        current, = await db.get_all_ledger_status(self.guild,land["id"])
+        receipts, selected, limit, _, _ = await banners.ledger_receipts(self.guild,current,1,old["operation_id"])
+        self.assertEqual((len(receipts),selected["id"],limit),(2,old["operation_id"],0))
+        _, selected, limit, _, _ = await banners.ledger_receipts(self.guild,current,1,reserve["operation_id"])
+        self.assertEqual((selected["sale_unit"],limit),(56,1))
+
+    async def remove_delivery_link_from_receipt(self, purchase_id):
+        # Simulate a checkout stored before the bot linked receipts to obligations.
+        async with bank.write(self.guild) as conn:
+            op = await conn.fetchone(f"SELECT receipt FROM {bank.table('operations')} WHERE guild_id=? AND id=?",
+                                     (self.guild,purchase_id))
+            old = json.loads(op["receipt"])
+            del old["owed_entry_id"]
+            await conn.execute(f"UPDATE {bank.table('operations')} SET receipt=? WHERE guild_id=? AND id=?",
+                               (json.dumps(old),self.guild,purchase_id))
+
+    async def test_cash_handover_partial_exchange_and_replay(self):
+        land, receipt = await self.purchase(blocks=3)
+        await self.deposit(90,request_id=3,treasury=True)
+        results = await asyncio.gather(self.handover(receipt,2),self.handover(receipt,2))
+        self.assertEqual(sum(r["duplicate"] for r in results),1)
+        r = results[0]
+        self.assertEqual((r["physical"],r["total"],r["treasury_debit"],r["land_debit"],r["remaining"]),(14,74,60,0,1))
+        entry = (await db.get_ledger_history(land["id"]))[0]
+        self.assertEqual((entry["id"],entry["recorded_by"],entry["type"],entry["blocks"]),(r["delivery_entry_id"],900,"delivered",2))
+        self.assertIn(f"purchase #{receipt['operation_id']}",entry["note"])
+        self.assertIn("14 ems received",entry["note"])
+        row, = await db.get_all_ledger_status(self.guild)
+        self.assertEqual((row["outstanding"],row["payments"]["due_ems"],row["payments"]["physical_ems"]),(1,7,14))
+        with self.assertRaisesRegex(ValueError,"different"):
+            await banners.create(self.guild,900,receipt["operation_id"],2,"Cash received",admin=True,
+                                 request_id=10,land_payment="physical")
+        final = await asyncio.gather(self.handover(receipt,request_id=11),self.handover(receipt,request_id=12),
+                                     return_exceptions=True)
+        self.assertEqual(sum(isinstance(x,ValueError) for x in final),1)
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],0)
+        self.assertEqual(await self.balance(treasury=True),0)
+        self.assertEqual((await public.statement(self.guild))["unsold"],4)
+
+    async def test_previously_delivered_purchase_cannot_use_another_open_delivery(self):
+        land, first = await self.purchase(chunks=26)
+        await self.remove_delivery_link_from_receipt(first["operation_id"])
+        await db.add_ledger_delivered(land["id"],self.guild,1)
+        await db.update_reserve_blocks(self.guild,4)
+        second = await bank.buy_claim(self.guild,10,request_id=3,kind="reserve")
+        with self.assertRaisesRegex(ValueError,"Only 0 banners can be matched"):
+            await self.handover(first)
+        result = await self.handover(second)
+        self.assertEqual((result["physical"],await self.balance(treasury=True)),(56,19))
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],0)
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],37)
+
+    async def test_legacy_open_purchase_and_out_of_order_linked_deliveries(self):
+        land, first = await self.purchase(chunks=26)
+        await self.remove_delivery_link_from_receipt(first["operation_id"])
+        await db.update_reserve_blocks(self.guild,4)
+        second = await bank.buy_claim(self.guild,10,request_id=3,kind="reserve")
+        await self.handover(second)
+        await self.handover(first,request_id=11)
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],0)
+
+    async def test_handover_requires_cash_and_an_open_delivery(self):
+        land, paid = await self.purchase(payment="bank",funds=7)
+        with self.assertRaisesRegex(ValueError,"manual purchase"):
+            await self.handover(paid)
+        free = await self.land(owner=20,chunks=0,name="New Keep")
+        await self.approval(free)
+        free_purchase = await bank.buy_claim(self.guild,20,request_id=4)
+        with self.assertRaisesRegex(ValueError,"manual purchase"):
+            await self.handover(free_purchase)
+        await db.add_ledger_delivered(land["id"],self.guild,2)
+        await db.update_reserve_blocks(self.guild,4)
+        reserve = await bank.buy_claim(self.guild,10,request_id=5,kind="reserve")
+        await db.add_ledger_owed(land["id"],self.guild,1)
+        with self.assertRaisesRegex(ValueError,"Only 0 banners can be matched"):
+            await self.handover(reserve)
+        await db.delete_land(land["id"])
+        with self.assertRaisesRegex(ValueError,"archived"):
+            await self.handover(reserve)
+
+    async def test_handover_failure_rolls_back_delivery_cash_and_subsidy(self):
+        land, receipt = await self.purchase()
+        with self.assertRaisesRegex(ValueError,"Central treasury needs 30"):
+            await self.handover(receipt)
+        await self.deposit(30,request_id=3,treasury=True)
+        with patch.object(bank,"_record",side_effect=RuntimeError("audit unavailable")),self.assertRaises(RuntimeError):
+            await self.handover(receipt)
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],1)
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],7)
+        self.assertEqual(await self.balance(treasury=True),30)
+        self.assertFalse((await self.handover(receipt))["duplicate"])
+
+    async def test_older_rotation_receipt_and_standalone_partial_settlement(self):
+        land = await self.land()
+        offer = await db.create_rotation_offer(self.guild,land["id"])
+        await public.accept_rotation(self.guild,offer,land["id"],2,7,37,900)
+        batch, = (await banners.status(self.guild,900,admin=True))["batches"]
+        receipt = {"operation_id":batch["id"],"land_id":land["id"]}
+        await self.remove_delivery_link_from_receipt(batch["id"])
+        await self.deposit(60,request_id=3,treasury=True)
+        await self.create(receipt,land_payment="physical")
+        with self.assertRaisesRegex(ValueError,"different"):
+            await self.handover(receipt)
+        with self.assertRaisesRegex(ValueError,"No tracked"):
+            await banners.create(self.guild+1,900,batch["id"],1,"Cash received",admin=True,request_id=11,
+                                 land_payment="physical",delivery_land_id=land["id"])
+        await self.handover(receipt,request_id=11)
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],1)
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],0)
 
     async def test_payment_liability_survives_delivery_and_partial_settlement(self):
         land, receipt = await self.purchase(blocks=3)
@@ -340,6 +497,32 @@ class BannerSQLite(BannerContract,unittest.IsolatedAsyncioTestCase):
         self.assertIn("Only Discord administrators",i.followup.send.await_args.kwargs["content"])
         self.assertEqual((await self.totals())["pending"],1)
 
+    async def test_deliver_optional_cash_receipt_and_notes(self):
+        land,r=await self.purchase(blocks=2)
+        cog = LedgerCog(None)
+        owner = interaction(self.guild)
+        owner.user.display_name = "Owner"
+        await cog.ledger_deliver.callback(cog,owner,"Test Keep",cash_receipt=r["operation_id"])
+        self.assertIn("Only Discord administrators",owner.followup.send.await_args.kwargs["content"])
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],2)
+        with patch("cogs.ledger._is_staff",return_value=False):
+            await cog.ledger_deliver.callback(cog,owner,"Test Keep",note="Paid on Tuesday")
+        self.assertFalse(owner.response.defer.await_args.kwargs["ephemeral"])
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],14)
+        await self.deposit(30,request_id=3,treasury=True)
+        admin = interaction(self.guild,admin=True)
+        admin.namespace = SimpleNamespace(land_name="Test Keep")
+        self.assertEqual([c.value for c in await cash_receipt_choices(admin,"")],[r["operation_id"]])
+        self.assertEqual(await cash_receipt_choices(owner,""),[])
+        await cog.ledger_deliver.callback(cog,admin,"Test Keep",note="At east gate",cash_receipt=r["operation_id"])
+        admin.response.defer.assert_awaited_once_with(ephemeral=True)
+        reply = admin.followup.send.await_args.kwargs
+        self.assertTrue(reply["ephemeral"])
+        self.assertIn("**7 ems**",reply["content"])
+        self.assertIn("At east gate",(await db.get_ledger_history(land["id"]))[0]["note"])
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],0)
+        self.assertEqual((await public.statement(self.guild))["payments"]["due_ems"],7)
+
     async def test_public_command_publishes_only_aggregate_figures(self):
         await self.purchase(payment="bank", funds=20)
         cog, i = BankCog(), interaction(self.guild)
@@ -366,6 +549,97 @@ class BannerSQLite(BannerContract,unittest.IsolatedAsyncioTestCase):
                 args = i.followup.send.await_args.kwargs
                 self.assertTrue(args["ephemeral"])
                 self.assertIn("14 ems",str(args["embed"].to_dict()))
+
+    async def test_buttons_open_forms_and_refresh_after_delivery_and_cash(self):
+        land,r = await self.purchase(chunks=26,blocks=2)
+        i = interaction(self.guild,user=900,admin=True)
+        i.edit_original_response = AsyncMock()
+        with patch("cogs.ledger._is_staff",new=AsyncMock(return_value=True)):
+            _, view = await ledger_report(i,1,land["id"])
+            self.assertIn(view.pickup,view.children)
+            await view.pickup.callback(i)
+            form = i.response.send_modal.await_args.args[0]
+            self.assertIn(str(r["operation_id"]),form.title)
+            self.assertEqual(form.limit,2)
+            self.assertIn("37",form.quantity.label)
+            form.quantity._value = "1"
+            await form.on_submit(i)
+            self.assertIn("37 ems received",i.edit_original_response.await_args.kwargs["content"])
+            self.assertTrue(view.is_finished())
+            view = i.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual(view.pickup_limit,1)
+            await view.deliver.callback(i)
+            form = i.response.send_modal.await_args.args[0]
+            form.quantity._value = "1"
+            await form.on_submit(i)
+            view = i.edit_original_response.await_args.kwargs["view"]
+            self.assertNotIn(view.pickup,view.children)
+            self.assertNotIn(view.deliver,view.children)
+            self.assertIn(view.collect,view.children)
+            await view.collect.callback(i)
+            form = i.response.send_modal.await_args.args[0]
+            form.quantity._value = "1"
+            i.id += 1
+            await form.on_submit(i)
+            self.assertIn("payment only",i.edit_original_response.await_args.kwargs["content"])
+            view = i.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual(set(view.children),{view.refresh,view.back})
+        current, = await db.get_all_ledger_status(self.guild,land["id"])
+        self.assertEqual((current["total_delivered"],current["payments"]["physical_ems"]),(2,74))
+
+    async def test_ledger_forms_recheck_reader_role_and_quantity(self):
+        land,_ = await self.purchase(chunks=26)
+        admin = interaction(self.guild,user=900,admin=True)
+        staff = interaction(self.guild,user=901)
+        with patch("cogs.ledger._is_staff",new=AsyncMock(return_value=True)) as staff_check:
+            _, staff_view = await ledger_report(staff,1,land["id"])
+            self.assertIn(staff_view.deliver,staff_view.children)
+            self.assertNotIn(staff_view.collect,staff_view.children)
+            self.assertNotIn(staff_view.pickup,staff_view.children)
+            _, admin_view = await ledger_report(admin,1,land["id"])
+            await admin_view.pickup.callback(staff)
+            staff.response.send_modal.assert_not_awaited()
+            await admin_view.pickup.callback(admin)
+            form = admin.response.send_modal.await_args.args[0]
+            form.quantity._value = "2"
+            await form.on_submit(admin)
+            self.assertIn("whole quantity",admin.response.send_message.await_args.args[0])
+            form.quantity._value = "1"
+            admin.permissions.administrator = False
+            await form.on_submit(admin)
+            self.assertIn("permission",admin.followup.send.await_args.args[0])
+            await staff_view.deliver.callback(staff)
+            form = staff.response.send_modal.await_args.args[0]
+            form.quantity._value = "1"
+            staff_check.return_value = False
+            await form.on_submit(staff)
+            self.assertIn("permission",staff.followup.send.await_args.args[0])
+        self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],1)
+
+    async def test_receipt_picker_pages_keep_the_land_and_expire_old_forms(self):
+        land, first = await self.purchase(chunks=26)
+        await db.update_reserve_blocks(self.guild,13)
+        for request_id in range(20,30):
+            await bank.buy_claim(self.guild,10,kind="reserve",request_id=request_id)
+        i = interaction(self.guild,user=900,admin=True)
+        i.edit_original_response = AsyncMock()
+        with patch("cogs.ledger._is_staff",return_value=True):
+            _, view = await ledger_report(i,2,land["id"])
+            pick = next(c for c in view.children if hasattr(c,"options"))
+            self.assertEqual(len(pick.options),10)
+            pick._values = [pick.options[1].value]
+            await pick.callback(i)
+            view = i.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual(view.purchase["id"],int(pick.options[1].value))
+            await view.pickup.callback(i)
+            old_form = i.response.send_modal.await_args.args[0]
+            await view.older.callback(i)
+            older = i.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual((older.page,older.selection.land_id,older.purchase["id"]),(2,land["id"],first["operation_id"]))
+            self.assertTrue(older.older.disabled)
+            await old_form.on_submit(i)
+            self.assertIn("latest controls",i.response.send_message.await_args.args[0])
+            self.assertEqual((await db.get_ledger_balance(land["id"]))["outstanding"],11)
 
     async def test_ledger_directory_navigation_uses_live_staff_access(self):
         for n in range(6):

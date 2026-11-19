@@ -114,12 +114,14 @@ weekly liability a second time.
 
 | Command | Purpose |
 | --- | --- |
-| `/ledger status` | Staff browse payment and delivery totals, then select a settlement for its breakdown and recent activity |
+| `/ledger status` | Staff select a settlement and record delivery. Administrators can select an unpaid purchase and confirm pickup with cash or payment alone |
 | `/ledger balance land_name:Coppercross` | Owner, officers or staff see that land's payments and deliveries |
 | `/ledger history land_name:Coppercross limit:25` | Browse the most recent delivery entries and their complete notes in private |
 | `/banner status land_name:Coppercross` | Owner/officers read the land's creation backlog and liabilities |
 | `/banner status` | Administrator sees all tracked purchases and total liabilities |
 | `/banner show purchase_id:123` | Fixed cost split and recent creation records for a purchase receipt |
+| `/ledger deliver land_name:Coppercross blocks:2` | Record two banners delivered. The quantity defaults to one |
+| `/ledger deliver land_name:Coppercross blocks:2 cash_receipt:123` | Administrator confirms cash received for purchase #123, records both banners delivered and settles their creation cost |
 | `/banner create purchase_id:123 blocks:1 reason:Crafted` | Administrator records actual creation and debits bank funds |
 | `/banner create purchase_id:123 blocks:1 reason:Cash received and spent land_payment:physical` | Administrator confirms physical payment of the unpaid land share; treasury funds only its fixed subsidy |
 | `/banner cost amount:37` | Administrator sets the creation cost and full sale price. Omit the amount to read it |
@@ -135,6 +137,22 @@ and the premium is credited to treasury. The default sale of 56 burns 37 and
 credits 19. Physical confirmation means the full payment was received, including
 the premium. Never also deposit those same emeralds as new bank funds.
 
+When the buyer hands over the emeralds and takes the banners in the same visit,
+staff can open the settlement in `/ledger status`. **Record delivery** updates
+its outstanding quantity. Administrators can use **Deliver and collect cash**
+for a pickup or **Confirm cash only** when the delivery is already recorded.
+The form starts at one banner and shows the selected purchase's price for cash
+actions. Submitting it updates the settlement report.
+
+For the slash-command shortcut,
+use `/ledger deliver` once for the quantity exchanged. Choose the settlement,
+then select its purchase in the optional `cash_receipt` field. The suggestions
+show the unpaid quantity and emerald price per banner. A treasury shortage
+leaves both delivery and payment open. For a delivery already entered in the
+ledger, use `/banner create land_payment:physical` once the cash is received.
+Older deliveries identify only the settlement. If they could already cover the
+selected receipt, check `/ledger history` before recording any further delivery.
+
 Bank-paid claims have already transferred the land contribution into the
 treasury. Creation spends that contribution there, together with the subsidy,
 without charging the land twice. Both required balances are checked before any
@@ -149,7 +167,7 @@ rewrite them. Creation records and obligations survive land deletion.
 **Bank paid** counts banners paid at checkout or debited from the settlement
 bank at creation. **Manual payment due** counts the banners and emeralds still
 owed by the settlement, including any premium. **Physical payment confirmed**
-counts the quantity an administrator settled with `/banner create land_payment:physical`.
+counts banners settled at delivery using `cash_receipt` or through `/banner create land_payment:physical`.
 Free banners have a zero settlement liability. Payment counts include delivered banners.
 
 For example, two manual banners at 7 ems each leave 14 ems to collect, even
@@ -160,6 +178,10 @@ tracked independently.
 Private tables use the RLS-enabled `sunset_banners` schema alongside the bank.
 
 ## Public settlement libraries
+
+For a later library update, let readers select a catalogue from the list, browse
+its pages and open a book. Give library managers **Add book** and **Edit this
+book** actions that carry the selected catalogue and title into the form.
 
 Each registered settlement can list one public library with a name, location
 (coordinates/dimension or directions), description and a catalogue of books.
