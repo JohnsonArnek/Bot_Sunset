@@ -24,6 +24,7 @@ class ShareEstimate(discord.ui.View):
         self.text = text
         self.attempted = False
         self.shared = False
+        self.busy = False
 
     async def _update_button(self):
         # Ephemeral messages must be edited through their interaction webhook,
@@ -50,15 +51,25 @@ class ShareEstimate(discord.ui.View):
         if (interaction.user.id != self.requester or interaction.guild_id != self.guild_id
                 or interaction.channel_id != self.channel_id or not interaction.permissions.administrator):
             await interaction.response.send_message(
-                "Only the requesting administrator can share this estimate.", ephemeral=True)
+                "Only the administrator who opened this estimate can use its controls.", ephemeral=True)
+            return False
+        if self.busy or self.is_finished():
+            await interaction.response.send_message("Use the current estimate once the action finishes.", ephemeral=True)
             return False
         return True
 
-    @discord.ui.button(label="Share estimate in this channel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Share estimate in this channel", style=discord.ButtonStyle.secondary, row=3)
     async def share(self, interaction, button):
         # Recheck here as well, so a callback cannot bypass current admin status.
         if not await self.interaction_check(interaction):
             return
+        self.busy = True
+        try:
+            await self._publish(interaction, button)
+        finally:
+            self.busy = False
+
+    async def _publish(self, interaction, button):
         if self.attempted:
             await self._notice(interaction, "This estimate has already been shared." if self.shared else
                                "The previous share is pending or unconfirmed. Check the channel before starting a new estimate.")
