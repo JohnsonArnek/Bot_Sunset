@@ -539,7 +539,7 @@ async def get_staff_role_id(guild_id: int) -> int:
 async def create_land(guild_id: int, name: str, owner_id: int, chunks: int = 0) -> int:
     now = datetime.now(timezone.utc).isoformat()
     async with DBConnection() as conn:
-        row = await conn.fetchone(
+        row = await conn.execute_returning_one(
             "INSERT INTO lands (guild_id, name, owner_id, chunks, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
             (guild_id, name, owner_id, chunks, now),
         )
@@ -722,11 +722,44 @@ async def is_officer(land_id: int, user_id: int) -> bool:
 
 # ── Claim request helpers ─────────────────────────────────────────────
 
-async def create_claim_request(land_id: int, chunks_requested: int, purpose: str) -> int | None:
-    now = datetime.now(timezone.utc).isoformat()
-    async with DBConnection() as conn, conn.transaction():
-        if IS_POSTGRES:
-            await conn.fetchone("SELECT id FROM lands WHERE id=? FOR UPDATE", (land_id,))
+async def create_claim_request(land_id: int, chunks_requested: int, purpose: str, *,
+                               guild=None, actor=None, weekly_only=False) -> int | None:
+    import bank_store
+    if guild is None:
+        existing_land = await get_land_by_id(land_id)
+        if not existing_land:
+            raise ValueError("This settlement is no longer registered here.")
+        guild = existing_land["guild_id"]
+    async with bank_store.write(guild) as conn:
+        at = bank_store.now()
+        land = await conn.fetchone("SELECT guild_id,owner_id FROM lands WHERE id=?" +
+                                   (" FOR UPDATE" if IS_POSTGRES else ""), (land_id,))
+        if not land or land["guild_id"] != guild:
+            raise ValueError("This settlement is no longer registered here.")
+        if actor is not None:
+            if land["owner_id"] != actor and not await conn.fetchone(
+                    "SELECT 1 FROM members WHERE land_id=? AND user_id=?", (land_id, actor)):
+                raise ValueError("Only the settlement owner or a registered member can request banners here.")
+            rows = await conn.fetchall("SELECT key,value FROM config WHERE guild_id=? "
+                                       "AND key IN ('max_queue_chunks','claim_mode')", (guild,))
+            settings = {r["key"]: r["value"] for r in rows}
+            if weekly_only and settings.get("claim_mode") == "rotation":
+                raise ValueError("This server uses the daily rotation.")
+            if weekly_only:
+                from datetime import timedelta
+                monday = (at - timedelta(days=at.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+                if await conn.fetchone("SELECT id FROM claim_requests WHERE land_id=? AND status='approved' "
+                                       "AND (approved_at IS NULL OR approved_at>?) LIMIT 1",
+                                       (land_id, (at-timedelta(days=7)).isoformat())):
+                    raise ValueError("This settlement already has an offer. Refresh its profile to review it.")
+                if await conn.fetchone("SELECT id FROM purchases WHERE land_id=? AND type='normal' AND purchased_at>=? LIMIT 1",
+                                       (land_id, monday.isoformat())):
+                    raise ValueError("This settlement has already used its weekly purchase. Refresh its profile.")
+            maximum = int(settings.get("max_queue_chunks", DEFAULT_CONFIG["max_queue_chunks"]))
+            if not 1 <= chunks_requested <= maximum:
+                raise ValueError(f"Request between 1 and {maximum:,} banners.")
+            if purpose not in ("vault", "builds", "other"):
+                raise ValueError("Choose Vault, Builds or Other.")
         existing = await conn.fetchone(
             "SELECT id FROM claim_requests WHERE land_id = ? AND status = 'pending'",
             (land_id,),
@@ -736,7 +769,7 @@ async def create_claim_request(land_id: int, chunks_requested: int, purpose: str
         row = await conn.fetchone(
             "INSERT INTO claim_requests (land_id, chunks_requested, purpose, requested_at, status) "
             "VALUES (?, ?, ?, ?, 'pending') RETURNING id",
-            (land_id, chunks_requested, purpose, now),
+            (land_id, chunks_requested, purpose, at.isoformat()),
         )
         return row["id"]
 
@@ -826,9 +859,9 @@ async def record_purchase(land_id: int, purchase_type: str, price_paid: int):
         await record_allocation_sale(conn, guild, land_id, purchase_type, price_paid, 1, bank_store.now())
 
 
-async def get_normal_purchase_this_week(land_id: int) -> dict | None:
+async def get_normal_purchase_this_week(land_id: int, *, at=None) -> dict | None:
     from datetime import timedelta
-    now = datetime.now(timezone.utc)
+    now = at or datetime.now(timezone.utc)
     days_since_monday = now.weekday()
     last_monday = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_since_monday)
     reset_iso = last_monday.isoformat()

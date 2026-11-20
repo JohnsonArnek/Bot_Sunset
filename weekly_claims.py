@@ -157,13 +157,16 @@ async def review(guild, request, approve):
         return row
 
 
-async def offers(guild, *, owner=None, unnotified=False):
+async def offers(guild, *, owner=None, land_id=None, unnotified=False):
     async with db.DBConnection() as conn:
         sql = DETAIL + "WHERE l.guild_id=? AND r.status='approved'"
         params = (guild,)
         if owner is not None:
             sql += " AND l.owner_id=?"
             params += (owner,)
+        if land_id is not None:
+            sql += " AND l.id=?"
+            params += (land_id,)
         if unnotified:
             sql += " AND r.approved_at IS NOT NULL AND r.offer_notified_at IS NULL"
         sql += " AND (r.approved_at IS NULL OR r.approved_at>?) ORDER BY r.requested_at,r.id"

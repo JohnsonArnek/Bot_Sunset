@@ -100,17 +100,23 @@ class QueueView(discord.ui.View):
         await self.navigate(interaction, self.page + 1)
 
 
-async def queue_card(guild, page=0, *, private=False):
+async def queue_card(guild, page=0, *, private=False, land_id=None):
     async with db.DBConnection() as conn:
         entries = await weekly.ranked(conn, guild, bank.now())
     pages = max(1, (len(entries) + PAGE_SIZE - 1) // PAGE_SIZE)
+    if land_id is not None:
+        position = next((i for i, row in enumerate(entries) if row["land_id"] == land_id), None)
+        if position is None:
+            raise ValueError("This settlement has left the queue. Refresh its profile to see the current offer.")
+        page = position // PAGE_SIZE
     page = min(max(page, 0), pages-1)
     offset = page * PAGE_SIZE
     rows = entries[offset:offset + PAGE_SIZE]
     embed = discord.Embed(title="Weekly claim queue", colour=discord.Colour.blue(),
         description="Pending requests in priority order." if rows else "No requests are waiting for allocation.")
     for pos, row in enumerate(rows, offset+1):
-        embed.add_field(name=f"{pos}. {row['land_name']}"[:256], inline=False, value=(
+        marker = "▸ " if row["land_id"] == land_id else ""
+        embed.add_field(name=f"{marker}{pos}. {row['land_name']}"[:256], inline=False, value=(
             f"**{row['chunks_requested']} banners** · {row['price']} ems each · {row['purpose'].title()}\n"
             f"Score {row['score']} · {row['days']}d waiting · {row['members']} members · {row['chunks']} chunks"))
     embed.set_footer(text=f"Page {page+1}/{pages} · {len(entries)} pending · Owners can open My allocation")

@@ -86,8 +86,8 @@ async def _balance(conn, guild, account_id):
     return int(row["balance"])
 
 
-async def _target(conn, guild, actor, *, admin, member=None, land_name=None, account_id=None, treasury=False):
-    if sum(x is not None for x in (member, land_name, account_id)) + bool(treasury) > 1:
+async def _target(conn, guild, actor, *, admin, member=None, land_name=None, account_id=None, treasury=False, land_id=None):
+    if sum(x is not None for x in (member, land_name, account_id, land_id)) + bool(treasury) > 1:
         raise ValueError("Choose one account: member, land_name, account_id or treasury.")
     if treasury:
         require_admin(admin)
@@ -98,8 +98,11 @@ async def _target(conn, guild, actor, *, admin, member=None, land_name=None, acc
         if not row:
             raise ValueError("No account with that ID exists on this server.")
         return row
-    if land_name is not None:
-        land = await conn.fetchone("SELECT * FROM lands WHERE guild_id=? AND LOWER(name)=LOWER(?)", (guild, land_name.strip()))
+    if land_name is not None or land_id is not None:
+        if land_id is not None:
+            land = await conn.fetchone("SELECT * FROM lands WHERE guild_id=? AND id=?", (guild, land_id))
+        else:
+            land = await conn.fetchone("SELECT * FROM lands WHERE guild_id=? AND LOWER(name)=LOWER(?)", (guild, land_name.strip()))
         if not land:
             raise ValueError("Land not found on this server.")
         if not admin and actor != land["owner_id"]:
@@ -121,9 +124,9 @@ async def account(guild, actor, *, admin, page=1, **target):
         entries = await conn.fetchall(
             f"SELECT e.delta,e.balance_after,o.id AS operation_id,o.actor_id,o.action,o.reason,o.created_at "
             f"FROM {table('entries')} e JOIN {table('operations')} o ON o.guild_id=e.guild_id AND o.id=e.operation_id "
-            "WHERE e.guild_id=? AND e.account_id=? ORDER BY e.id DESC LIMIT 3 OFFSET ?", (guild, row["id"], (page-1)*3))
+            "WHERE e.guild_id=? AND e.account_id=? ORDER BY e.id DESC LIMIT 4 OFFSET ?", (guild, row["id"], (page-1)*3))
         banners = await banner_store.summary(conn, guild, row["id"]) if row["kind"] in ("land", "treasury") else None
-        return row | dict(balance=balance, entries=entries, banners=banners)
+        return row | dict(balance=balance, entries=entries[:3], has_more=len(entries)>3, banners=banners)
 
 
 async def accounts(guild, *, admin, page=1):
