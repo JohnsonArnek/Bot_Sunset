@@ -83,6 +83,11 @@ def offer_card(guild, row):
     return dict(embed=embed, view=view, allowed_mentions=NO_MENTIONS)
 
 
+async def send_offer_cards(interaction, rows):
+    for row in rows:
+        await interaction.followup.send(**offer_card(interaction.guild, row), ephemeral=True)
+
+
 async def notify_offers(bot, guild):
     # Both a decline callback and the distribution loop may wake the sender.
     if not hasattr(bot, "_weekly_notice_lock"):

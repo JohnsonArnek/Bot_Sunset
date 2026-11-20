@@ -11,7 +11,7 @@ import models
 import weekly_claims as weekly
 from cogs.bank_screens import account_card
 from cogs.claims import submit_request
-from cogs.land_members import member_card
+from cogs.land_members import is_staff, member_card
 from cogs.ledger import can_read_land, settlement_embed
 from cogs.queue_cog import queue_card
 from cogs.report_view import NO_MENTIONS, clip
@@ -219,18 +219,23 @@ async def profile_card(interaction, *, land_id, directory_page=None, private=Fal
 
 
 class LandSelect(discord.ui.Select):
-    def __init__(self, lands, page, private):
-        super().__init__(placeholder="Open a settlement", row=0, options=[
+    def __init__(self, lands, page, private, manage_rosters):
+        prompt = "Choose a settlement to manage" if manage_rosters else "Open a settlement"
+        super().__init__(placeholder=prompt, row=0, options=[
             discord.SelectOption(label=clip(land["name"], 100), value=str(land["id"])) for land in lands])
-        self.page, self.private = page, private
+        self.page, self.private, self.manage_rosters = page, private, manage_rosters
 
     async def callback(self, interaction):
-        await open_card(interaction, partial(profile_card, land_id=int(self.values[0]), directory_page=self.page,
-                                              private=True), replace=self.private)
+        land_id = int(self.values[0])
+        profile = partial(profile_card, land_id=land_id, directory_page=self.page, private=True)
+        render = partial(member_card, land_id=land_id, back=profile) if self.manage_rosters else profile
+        await open_card(interaction, render, replace=self.private)
 
 
-async def directory_card(interaction, *, page=1, private=False):
+async def directory_card(interaction, *, page=1, private=False, manage_rosters=False):
     guild = interaction.guild_id
+    if manage_rosters and not await is_staff(interaction):
+        raise ValueError("Only staff can browse all settlement rosters for management.")
     async with db.DBConnection() as conn:
         count = await conn.fetchone("SELECT COUNT(*) AS n FROM lands WHERE guild_id=?", (guild,))
         pages = max(1, (count["n"] + 9) // 10)
@@ -239,13 +244,14 @@ async def directory_card(interaction, *, page=1, private=False):
             "SELECT l.id,l.name,l.owner_id,l.chunks,COALESCE(l.bonus_members,0) + "
             "(SELECT COUNT(*) FROM members m WHERE m.land_id=l.id) AS member_count "
             "FROM lands l WHERE guild_id=? ORDER BY LOWER(name),id LIMIT 10 OFFSET ?", (guild, (page - 1) * 10))
-    embed = discord.Embed(title="Registered settlements", colour=discord.Colour.teal())
+    title = "Choose a settlement to manage" if manage_rosters else "Registered settlements"
+    embed = discord.Embed(title=title, colour=discord.Colour.teal())
     if not rows:
         embed.description = "No settlements registered yet."
         return dict(embed=embed, view=None)
     for row in rows:
         embed.add_field(name=clip(row["name"], 256), value=f"<@{row['owner_id']}> · {row['chunks']:,} chunks · {row['member_count']:,} members", inline=False)
     embed.set_footer(text=f"Page {page}/{pages} · {count['n']} settlements")
-    view = PageView(partial(directory_card, private=True), page, page < pages, private=private)
-    view.add_item(LandSelect(rows, page, private))
+    view = PageView(partial(directory_card, private=True, manage_rosters=manage_rosters), page, page < pages, private=private)
+    view.add_item(LandSelect(rows, page, private, manage_rosters))
     return dict(embed=embed, view=view)
