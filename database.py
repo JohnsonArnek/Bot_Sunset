@@ -657,7 +657,7 @@ async def change_land_roster(guild_id, land_id, actor_id, *, staff, user_id, act
         member = await conn.fetchone("SELECT 1 FROM members WHERE land_id=? AND user_id=?", target)
         officer = await conn.fetchone("SELECT 1 FROM officers WHERE land_id=? AND user_id=?", target)
         if action == "remove":
-            if not member:
+            if not member and not officer:
                 raise ValueError("This person is not a member of this settlement.")
             await conn.execute("DELETE FROM officers WHERE land_id=? AND user_id=?", target)
             await conn.execute("DELETE FROM members WHERE land_id=? AND user_id=?", target)
