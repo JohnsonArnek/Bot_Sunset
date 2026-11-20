@@ -11,6 +11,35 @@ import database as db
 import models
 import bank_store
 from cogs.weekly_offers import OfferAction, review_request
+from cogs.report_view import clip
+
+
+async def submit_request(interaction, land, chunks, purpose, *, profile_view=None):
+    from_profile = profile_view is not None
+    try:
+        request_id = await db.create_claim_request(land["id"], chunks, purpose, guild=interaction.guild_id,
+                                                   actor=interaction.user.id, weekly_only=from_profile)
+    except ValueError as exc:
+        return await interaction.followup.send(str(exc), ephemeral=True)
+    if not request_id:
+        return await interaction.followup.send("This settlement already has a pending request.", ephemeral=True)
+
+    full_cost = await db.get_full_block_cost(interaction.guild_id)
+    price = models.block_price(land["chunks"], full_cost)
+
+    embed = discord.Embed(
+        title="📋 Claim Request Submitted",
+        colour=discord.Colour.green(),
+    )
+    embed.add_field(name="Land", value=clip(land["name"], 1024), inline=True)
+    embed.add_field(name="Chunks Requested", value=str(chunks), inline=True)
+    embed.add_field(name="Purpose", value=purpose.title(), inline=True)
+    embed.add_field(name="Price Per Block", value=f"{price} ems" if price > 0 else "Free", inline=True)
+    embed.add_field(name="Request ID", value=f"#{request_id}", inline=True)
+    if not from_profile:
+        embed.set_footer(text="Use /queue to see your position.")
+
+    await interaction.followup.send(embed=embed, view=profile_view, ephemeral=from_profile, allowed_mentions=discord.AllowedMentions.none())
 
 
 class ClaimsCog(commands.GroupCog, name="claim"):
@@ -55,50 +84,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
                 "❌ You don't belong to any land on this server. Use `/land create` first.", ephemeral=True
             )
 
-        # Check for existing pending request
-        existing = await db.get_pending_request(land["id"])
-        if existing:
-            return await interaction.followup.send(
-                "⚠️ Your land already has a pending claim request. "
-                "Wait for it to be processed or cancel it first.",
-                ephemeral=True,
-            )
-
-        if chunks < 1:
-            return await interaction.followup.send(
-                "❌ You must request at least 1 chunk.", ephemeral=True
-            )
-
-        max_chunks = int(await db.get_config(interaction.guild_id, "max_queue_chunks") or "1")
-        if chunks > max_chunks:
-            return await interaction.followup.send(
-                f"❌ You can only request up to **{max_chunks}** chunk(s) per submission on this server.",
-                ephemeral=True,
-            )
-
-        request_id = await db.create_claim_request(land["id"], chunks, purpose.value)
-        if not request_id:
-            return await interaction.followup.send(
-                "⚠️ Your land already has a pending claim request. "
-                "Wait for it to be processed or cancel it first.",
-                ephemeral=True,
-            )
-
-        full_cost = await db.get_full_block_cost(interaction.guild_id)
-        price = models.block_price(land["chunks"], full_cost)
-
-        embed = discord.Embed(
-            title="📋 Claim Request Submitted",
-            colour=discord.Colour.green(),
-        )
-        embed.add_field(name="Land", value=land["name"], inline=True)
-        embed.add_field(name="Chunks Requested", value=str(chunks), inline=True)
-        embed.add_field(name="Purpose", value=purpose.name, inline=True)
-        embed.add_field(name="Price Per Block", value=f"{price} ems" if price > 0 else "Free", inline=True)
-        embed.add_field(name="Request ID", value=f"#{request_id}", inline=True)
-        embed.set_footer(text="Use /queue to see your position.")
-
-        await interaction.followup.send(embed=embed)
+        await submit_request(interaction, land, chunks, purpose.value)
 
     async def _checkout(self, interaction, *, kind="normal", payment="manual"):
         private = payment == "bank"

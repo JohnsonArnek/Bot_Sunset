@@ -20,6 +20,8 @@ from cogs.weekly_offers import OfferAction, notify_offers, offer_card, review_re
 from cogs.bank import BankCog
 from cogs.claims import ClaimsCog
 from cogs.distribution import DistributionCog
+from cogs.land import LandCog
+from cogs.settlement_profile import directory_card, profile_card
 
 
 AT = datetime(2026, 11, 13, 12, tzinfo=timezone.utc)
@@ -32,6 +34,96 @@ def interaction(guild, user=10, admin=False, request_id=100):
 
 
 class BankContract:
+    async def test_settlement_profile_request_offer_purchase_delivery(self):
+        land_id = await db.create_land(self.guild, "Coppercross", 10, 4)
+        owner = interaction(self.guild)
+        owner.guild = SimpleNamespace(id=self.guild, name="Server", owner_id=900)
+        owner.user.guild_permissions = owner.permissions
+        cog = LandCog(None)
+        await cog.land_info.callback(cog, owner)
+        card = owner.followup.send.await_args.kwargs
+        actions = {button.label: button for button in card["view"].children}
+        await actions["Request banners"].callback(owner)
+        options = owner.followup.send.await_args.kwargs
+        self.assertTrue(options["ephemeral"])
+        options["view"].choose._values = ["builds"]
+        await options["view"].choose.callback(owner)
+        pending = await db.get_pending_request(land_id)
+        self.assertEqual((pending["chunks_requested"], pending["purpose"]), (1, "builds"))
+        queue = await profile_card(owner, land_id=land_id)
+        position = next(btn for btn in queue["view"].children if btn.label == "View queue position")
+        await position.callback(owner)
+        self.assertIn("▸ 1. Coppercross", str(owner.followup.send.await_args.kwargs["embed"].to_dict()))
+        await weekly.review(self.guild, pending["id"], True)
+        # An older request form cannot submit a new request over this offer.
+        await options["view"].choose.callback(owner)
+        self.assertIsNone(await db.get_pending_request(land_id))
+        offered = await profile_card(owner, land_id=land_id)
+        self.assertIn("7 ems total", offered["embed"].description)
+        review = next(btn for btn in offered["view"].children if btn.label == "Review offer")
+        visitor = interaction(self.guild, user=44)
+        visitor.guild = owner.guild
+        await review.callback(visitor)
+        self.assertIsNone(visitor.followup.send.await_args.kwargs["view"])
+        await review.callback(owner)
+        choices = owner.followup.send.await_args.kwargs["view"].children
+        owner.edit_original_response = AsyncMock()
+        await next(btn for btn in choices if btn.action=="manual").callback(owner)
+        purchased = await profile_card(owner, land_id=land_id)
+        self.assertIn("purchase is recorded", purchased["embed"].description)
+        delivery = next(btn for btn in purchased["view"].children if btn.label == "View delivery")
+        await delivery.callback(owner)
+        private = owner.followup.send.await_args.kwargs
+        self.assertTrue(private["ephemeral"])
+        self.assertIn("Manual payment due", private["embed"].description)
+        visitor.user.guild_permissions = visitor.permissions
+        await delivery.callback(visitor)
+        self.assertIsNone(visitor.followup.send.await_args.kwargs["embed"])
+
+    async def test_profile_bank_checks_current_officer_and_selected_land_on_each_page(self):
+        land = await self.land()
+        reader = interaction(self.guild, user=44)
+        profile = await profile_card(reader, land_id=land["id"])
+        button = next(btn for btn in profile["view"].children if btn.label=="Settlement bank")
+        for n in range(4):
+            await self.deposit(10, request_id=100+n, land_name=land["name"])
+        self.assertNotIn("Balance:", str(profile["embed"].to_dict()))
+        await button.callback(reader)
+        self.assertIsNone(reader.followup.send.await_args.kwargs["embed"])
+        await db.add_officer(land["id"], 44)
+        await button.callback(reader)
+        private = reader.followup.send.await_args.kwargs
+        self.assertTrue(private["ephemeral"])
+        self.assertIn("40 ems", private["embed"].description)
+        self.assertFalse(private["view"].next_page.disabled)
+        reader.edit_original_response = AsyncMock()
+        await private["view"].next_page.callback(reader)
+        self.assertIn("page 2", reader.edit_original_response.await_args.kwargs["embed"].description)
+        await db.remove_officer(land["id"], 44)
+        await private["view"].next_page.callback(reader)
+        self.assertIsNone(reader.edit_original_response.await_args.kwargs["embed"])
+        with self.assertRaises(ValueError):
+            await bank.account(self.guild+1, 900, admin=True, land_id=land["id"])
+
+    async def test_directory_selection_and_back_preserve_page_without_editing_public_message(self):
+        reader = interaction(self.guild, user=44)
+        for n in range(12):
+            await self.land(owner=50+n, name=f"Land {n:02d}")
+        directory = await directory_card(reader)
+        await directory["view"].next_page.callback(reader)
+        private_page = reader.followup.send.await_args.kwargs
+        self.assertTrue(private_page["ephemeral"])
+        select = next(item for item in private_page["view"].children if isinstance(item,discord.ui.Select))
+        self.assertEqual([o.label for o in select.options], ["Land 10", "Land 11"])
+        select._values = [select.options[1].value]
+        reader.edit_original_response = AsyncMock()
+        await select.callback(reader)
+        selected = reader.edit_original_response.await_args.kwargs
+        self.assertEqual(selected["embed"].title, "Land 11")
+        back = next(button for button in selected["view"].children if button.label=="Back to list")
+        await back.callback(reader)
+        self.assertIn("Page 2/2", reader.edit_original_response.await_args.kwargs["embed"].footer.text)
+
     async def test_weekly_offer_decline_reallocates_once_and_rolls_remaining_into_leftovers(self):
         first = await self.land(name="First", owner=10)
         second = await self.land(name="Second", owner=20)
@@ -346,6 +438,39 @@ class BankContract:
 
 
 class BankSQLite(BankContract, unittest.IsolatedAsyncioTestCase):
+    async def test_profile_request_modal_rechecks_member_quantity_and_claim_mode(self):
+        land = await self.land()
+        await db.add_member(land["id"], 44)
+        await db.set_config(self.guild, "max_queue_chunks", "4")
+        member = interaction(self.guild, user=44)
+        card = await profile_card(member, land_id=land["id"])
+        request = next(btn for btn in card["view"].children if btn.label == "Request banners")
+        await request.callback(member)
+        choose = member.followup.send.await_args.kwargs["view"].choose
+        choose._values = ["vault"]
+        await choose.callback(member)
+        modal = member.response.send_modal.await_args.args[0]
+        modal.quantity._value = "3"
+        await db.remove_member(land["id"], 44)
+        await modal.on_submit(member)
+        self.assertIsNone(await db.get_pending_request(land["id"]))
+        await db.add_member(land["id"], 44)
+        await db.set_config(self.guild, "max_queue_chunks", "2")
+        await modal.on_submit(member)
+        self.assertIsNone(await db.get_pending_request(land["id"]))
+        await db.set_config(self.guild, "claim_mode", "rotation")
+        modal.quantity._value = "2"
+        await modal.on_submit(member)
+        self.assertIsNone(await db.get_pending_request(land["id"]))
+        rotation = await profile_card(member, land_id=land["id"])
+        self.assertNotIn("Request banners", [btn.label for btn in rotation["view"].children])
+        await db.set_config(self.guild, "claim_mode", "weekly")
+        await modal.on_submit(member)
+        saved = await db.get_pending_request(land["id"])
+        self.assertEqual((saved["chunks_requested"], saved["purpose"]), (2, "vault"))
+        labels = [btn.label for btn in member.followup.send.await_args.kwargs["view"].children]
+        self.assertIn("View queue position", labels)
+
     async def test_staff_review_and_closed_dms_leave_the_offer_available_to_the_owner(self):
         land = await self.land()
         request = await db.create_claim_request(land["id"], 2, "vault")

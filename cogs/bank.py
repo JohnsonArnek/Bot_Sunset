@@ -31,6 +31,31 @@ def target(member, land_name, account_id):
     return dict(member=member.id if member else None, land_name=land_name, account_id=account_id)
 
 
+def account_text(row, page=1, *, statement=False):
+    lines = [f"**{account_name(row)} · account #{row['id']}**", f"Balance: **{row['balance']:,} ems**"]
+    if row["banners"]:
+        b = row["banners"]
+        share = b["land_share"] if row["kind"] == "land" else b["central_share"]
+        needed = b["land_share"]-b["prepaid"] if row["kind"] == "land" else b["central_share"]+b["prepaid"]
+        lines.append(f"**Creation funding for sold banners** · {b['pending']:,} awaiting settlement\n"
+                     f"This budget's share: **{share:,} ems** · bank funding still needed: **{needed:,} ems**\n"
+                     f"Land contributions already transferred to treasury: {b['prepaid']:,} ems.\n"
+                     "Funds are not reserved. Physical land payment can be confirmed by an administrator at creation.")
+        if b["premium_due"]:
+            lines.append(f"Manual reserve premiums due to the treasury: **{b['premium_due']:,} ems**.")
+    if statement:
+        lines.append(f"**Statement · page {page} · 3 entries per page**")
+        for e in row["entries"]:
+            lines.append(f"**#{e['operation_id']} · {e['delta']:+,} ems** · {e['action']} · {e['created_at'][:10]} UTC\n"
+                         f"By <@{e['actor_id']}> · balance after entry: {e['balance_after']:,} ems\n"
+                         f"{discord.utils.escape_markdown(e['reason'])}")
+        if not row["entries"]:
+            lines.append("No entries on this page.")
+    else:
+        lines.append("Balances use whole emeralds. An administrator records deposits and withdrawals.")
+    return "\n\n".join(lines)
+
+
 @app_commands.guild_only()
 class BankCog(commands.GroupCog, name="bank", group_description="Emerald accounts, statements and administrator banking"):
     async def interaction_check(self, interaction):
@@ -86,28 +111,7 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
                                       page=page, treasury=treasury, **target(member, land_name, account_id))
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        lines = [f"**{account_name(row)} · account #{row['id']}**", f"Balance: **{row['balance']:,} ems**"]
-        if row["banners"]:
-            b = row["banners"]
-            share = b["land_share"] if row["kind"] == "land" else b["central_share"]
-            needed = b["land_share"]-b["prepaid"] if row["kind"] == "land" else b["central_share"]+b["prepaid"]
-            lines.append(f"**Creation funding for sold banners** · {b['pending']:,} awaiting settlement\n"
-                         f"This budget's share: **{share:,} ems** · bank funding still needed: **{needed:,} ems**\n"
-                         f"Land contributions already transferred to treasury: {b['prepaid']:,} ems.\n"
-                         "Funds are not reserved. Physical land payment can be confirmed by an administrator at creation.")
-            if b["premium_due"]:
-                lines.append(f"Manual reserve premiums due to the treasury: **{b['premium_due']:,} ems**.")
-        if statement:
-            lines.append(f"**Statement · page {page} · 3 entries per page**")
-            for e in row["entries"]:
-                lines.append(f"**#{e['operation_id']} · {e['delta']:+,} ems** · {e['action']} · {e['created_at'][:10]} UTC\n"
-                             f"By <@{e['actor_id']}> · balance after entry: {e['balance_after']:,} ems\n"
-                             f"{discord.utils.escape_markdown(e['reason'])}")
-            if not row["entries"]:
-                lines.append("No entries on this page.")
-        else:
-            lines.append("Balances use whole emeralds. An administrator records deposits and withdrawals.")
-        await reply(interaction, "\n\n".join(lines))
+        await reply(interaction, account_text(row, page, statement=statement))
 
     @app_commands.command(description="Read your balance, your land's balance, or an account as administrator")
     @app_commands.describe(member="Yourself, or another member for administrators", land_name="Your settlement; administrators may select any",
