@@ -14,6 +14,7 @@ import discord
 
 import database as db
 import acclimation_store
+import weekly_claims as weekly
 import handbook_store as store
 from cogs import handbook_browser as browser
 from cogs.sunset import SunsetCog
@@ -25,13 +26,101 @@ def article(slug="public", book="citizens", pages=None):
 
 
 def interaction(user=10, guild=100, *, admin=False, roles=()):
-    return SimpleNamespace(user=SimpleNamespace(id=user, roles=[SimpleNamespace(id=r) for r in roles]),
-                           guild_id=guild, guild=SimpleNamespace(id=guild, owner_id=900), channel_id=55,
-                           permissions=discord.Permissions(administrator=admin), response=AsyncMock(),
+    permissions = discord.Permissions(administrator=admin)
+    return SimpleNamespace(user=SimpleNamespace(id=user, guild_permissions=permissions, roles=[SimpleNamespace(id=r) for r in roles]),
+                           guild_id=guild, guild=SimpleNamespace(id=guild, name="Test server", owner_id=900), channel_id=55,
+                           permissions=permissions, response=AsyncMock(),
                            followup=AsyncMock(), edit_original_response=AsyncMock())
 
 
 class StoreContract:
+    async def test_personal_shortcut_opens_readers_statement_and_rechecks_article_access(self):
+        slug = "personal-banking"
+        await store.import_articles(self.guild, [article(slug), article()])
+        reader = interaction(guild=self.guild)
+        await browser.open_help(reader, slug)
+        view = reader.followup.send.await_args.kwargs["view"]
+        self.assertEqual(view.shortcut.label, "My account")
+        other = interaction(user=15, guild=self.guild)
+        await view.shortcut.callback(other)
+        other.followup.send.assert_not_awaited()
+        await view.shortcut.callback(reader)
+        card = reader.followup.send.await_args.kwargs
+        self.assertTrue(card["ephemeral"])
+        self.assertEqual(card["embed"].title, "Personal bank account")
+        self.assertIn("Statement", card["embed"].description)
+        self.assertIn("<@10>", card["embed"].description)
+        reader.edit_original_response.assert_not_awaited()
+        await store.import_articles(self.guild, [article(slug, "war")])
+        await view.shortcut.callback(reader)
+        self.assertEqual(reader.followup.send.await_args.args, (browser.UNAVAILABLE,))
+        _, plain = await browser.render(reader, slug="public")
+        self.assertNotIn(plain.shortcut, plain.children)
+
+    async def test_roster_shortcut_routes_owners_staff_and_read_only_officers(self):
+        slug = "managing-settlement-members"
+        await store.import_articles(self.guild, [article(slug, "settlements")])
+        land = await db.create_land(self.guild, "Owner settlement", 10)
+        await db.add_officer(land, 12)
+        owner = interaction(guild=self.guild)
+        _, view = await browser.render(owner, slug=slug)
+        self.assertEqual(view.shortcut.label, "Manage roster")
+        await view.shortcut.callback(owner)
+        self.assertEqual(owner.followup.send.await_args.kwargs["view"].land_id, land)
+        _, officer = await browser.render(interaction(12, self.guild), slug=slug)
+        self.assertNotIn(officer.shortcut, officer.children)
+        # The article stays readable as an officer after transferring ownership.
+        await db.add_officer(land, owner.user.id)
+        await db.update_land_owner(land, 13)
+        await view.shortcut.callback(owner)
+        self.assertIn("no longer have access", owner.followup.send.await_args.args[0])
+
+        await db.set_config(self.guild, "staff_role_id", "77")
+        staff = interaction(22, self.guild, roles=(77,))
+        for index in range(10):
+            await db.create_land(self.guild, f"A-{index}", staff.user.id + index)
+        _, staff_view = await browser.render(staff, slug=slug)
+        await staff_view.shortcut.callback(staff)
+        directory = staff.followup.send.await_args.kwargs
+        self.assertTrue(directory["ephemeral"])
+        await directory["view"].next_page.callback(staff)
+        page = staff.edit_original_response.await_args.kwargs
+        self.assertEqual(page["embed"].title, "Choose a settlement to manage")
+        picker = next(c for c in page["view"].children if isinstance(c, discord.ui.Select))
+        self.assertEqual([option.value for option in picker.options], [str(land)])
+        picker._values = [str(land)]
+        await picker.callback(staff)
+        self.assertEqual(staff.edit_original_response.await_args.kwargs["view"].land_id, land)
+        staff.user.roles = []
+        await picker.callback(staff)
+        self.assertIsNone(staff.edit_original_response.await_args.kwargs["view"])
+
+    async def test_weekly_shortcut_only_reviews_live_offers_for_the_reader(self):
+        slug = "buying-settlement-blocks"
+        await store.import_articles(self.guild, [article(slug, "settlements")])
+        land = await db.create_land(self.guild, "Test keep", 10, chunks=3)
+        owner = interaction(guild=self.guild)
+        request = await db.create_claim_request(land, 2, "builds")
+        _, pending = await browser.render(owner, slug=slug)
+        self.assertNotIn(pending.shortcut, pending.children)
+        await weekly.review(self.guild, request, True)
+        _, view = await browser.render(owner, slug=slug)
+        self.assertEqual(view.shortcut.label, "Review my offer")
+        _, staff = await browser.render(interaction(22, self.guild, admin=True), slug=slug)
+        self.assertNotIn(staff.shortcut, staff.children)
+        await view.shortcut.callback(owner)
+        card = owner.followup.send.await_args.kwargs
+        self.assertTrue(card["ephemeral"])
+        self.assertEqual(card["embed"].title, "Weekly banner allocation")
+        self.assertIn("Test keep", card["embed"].description)
+        self.assertEqual([r["id"] for r in await weekly.offers(self.guild, owner=10)], [request])
+        self.assertIsNone(await db.get_normal_purchase_this_week(land))
+        await weekly.decline(self.guild, 10, request)
+        await view.shortcut.callback(owner)
+        self.assertIn("no open weekly banner offer", owner.followup.send.await_args.args[0])
+        _, closed = await browser.render(owner, slug=slug)
+        self.assertNotIn(closed.shortcut, closed.children)
+
     async def test_private_queries_and_import_are_server_scoped(self):
         await store.import_articles(self.guild, [article(), article("hidden", "war")])
         self.assertEqual([r["slug"] for r in await store.catalog(self.guild, {"citizens"})], ["public"])

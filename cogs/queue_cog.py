@@ -7,7 +7,7 @@ from discord.ext import commands
 import bank_store as bank
 import database as db
 import weekly_claims as weekly
-from cogs.weekly_offers import NO_MENTIONS, is_staff, offer_card, review_request
+from cogs.weekly_offers import NO_MENTIONS, is_staff, review_request, send_offer_cards
 
 
 PAGE_SIZE = 8
@@ -88,8 +88,7 @@ class QueueView(discord.ui.View):
         rows = await weekly.offers(interaction.guild_id, owner=interaction.user.id)
         if not rows:
             return await interaction.followup.send("You have no open allocation as a settlement owner.", ephemeral=True)
-        for row in rows:
-            await interaction.followup.send(**offer_card(interaction.guild, row), ephemeral=True)
+        await send_offer_cards(interaction, rows)
 
     @discord.ui.button(label="Previous")
     async def previous(self, interaction, button):

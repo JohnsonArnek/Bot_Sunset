@@ -30,6 +30,11 @@ article bodies or permissions. Restricted titles and summaries are also filtered
 Database failures deny access. Menus expire after ten minutes of inactivity;
 run the command again to reopen them. Already-read text cannot be recalled.
 
+Article shortcuts are matched by book and slug in `cogs/handbook_actions.py`.
+Keep those identifiers when editing an article that opens a bot screen. Each
+click checks current access and opens a separate private response, so the
+reader can return to the same handbook page.
+
 ## Private article storage
 
 Article titles, summaries and pages live in `sunset_handbooks.articles`, a private

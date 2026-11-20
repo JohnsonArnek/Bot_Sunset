@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 
 import handbook_store as store
+from cogs.handbook_actions import resolve_shortcut
 
 
 log = logging.getLogger("claims-bot")
@@ -52,7 +53,7 @@ class ArticleSelect(discord.ui.Select):
 
 
 class HandbookView(discord.ui.View):
-    def __init__(self, interaction, books, *, book=None, slug=None, page=0, count=1, rows=()):
+    def __init__(self, interaction, books, *, book=None, slug=None, page=0, count=1, rows=(), action_label=None):
         super().__init__(timeout=600)
         self.owner = interaction.user.id
         self.guild = interaction.guild_id
@@ -64,6 +65,10 @@ class HandbookView(discord.ui.View):
         self.add_item(BookSelect(books))
         if rows:
             self.add_item(ArticleSelect(rows))
+        if action_label:
+            self.shortcut.label = action_label
+        else:
+            self.remove_item(self.shortcut)
 
     async def interaction_check(self, interaction):
         if (interaction.user.id != self.owner or interaction.guild_id != self.guild
@@ -105,6 +110,31 @@ class HandbookView(discord.ui.View):
     async def library(self, interaction, button):
         await self.navigate(interaction)
 
+    @discord.ui.button(label="Open", row=3, style=discord.ButtonStyle.primary)
+    async def shortcut(self, interaction, button):
+        if not await self.interaction_check(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            books = await store.allowed_books(interaction)
+            article = await store.article(interaction.guild_id, books, self.slug)
+            if not article or article["book"] != self.book:
+                raise LookupError()
+            action = await resolve_shortcut(interaction, self.book, self.slug, books)
+            if action:
+                _, open_screen = action
+                return await open_screen(interaction)
+            message = ("You have no open weekly banner offer." if self.slug == "buying-settlement-blocks"
+                       else "You no longer have access to this action.")
+        except LookupError:
+            message = UNAVAILABLE
+        except ValueError as exc:
+            message = str(exc)
+        except Exception as exc:
+            log.warning("Handbook shortcut unavailable (%s)", type(exc).__name__)
+            message = "This screen could not be opened. Try the article button again shortly."
+        await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
 
 async def render(interaction, *, book=None, slug=None, page=0):
     books = await store.allowed_books(interaction)
@@ -123,7 +153,13 @@ async def render(interaction, *, book=None, slug=None, page=0):
         embed = discord.Embed(title=article["title"], description=article["pages"][page], colour=discord.Colour.orange())
         embed.set_author(name=store.BOOKS[book])
         embed.set_footer(text=f"Page {page + 1}/{count} · Updated {article['updated_at'][:10]} UTC · /sunset help topic:{slug}")
-        return embed, HandbookView(interaction, published | {book}, book=book, slug=slug, page=page, count=count)
+        try:
+            action = await resolve_shortcut(interaction, book, slug, books)
+        except Exception as exc:
+            log.warning("Handbook shortcut lookup unavailable (%s)", type(exc).__name__)
+            action = None
+        return embed, HandbookView(interaction, published | {book}, book=book, slug=slug, page=page, count=count,
+                                   action_label=action[0] if action else None)
     if book:
         articles = [r for r in rows if r["book"] == book]
         count = max(1, (len(articles) + 9) // 10)
