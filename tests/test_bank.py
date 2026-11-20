@@ -29,12 +29,129 @@ AT = datetime(2026, 11, 13, 12, tzinfo=timezone.utc)
 
 
 def interaction(guild, user=10, admin=False, request_id=100):
-    return SimpleNamespace(id=request_id, guild_id=guild, channel_id=123, user=SimpleNamespace(id=user, roles=[]),
+    return SimpleNamespace(id=request_id, guild_id=guild, channel_id=123, user=SimpleNamespace(id=user, display_name=str(user), roles=[]),
                            permissions=discord.Permissions(administrator=admin),
                            response=AsyncMock(), followup=AsyncMock())
 
 
 class BankContract:
+    async def test_profile_member_management_add_promote_remove_and_back(self):
+        land = await self.land(name="Coppercross")
+        owner = interaction(self.guild)
+        rotation = SimpleNamespace(refresh_allowed_reactors=AsyncMock())
+        owner.client = Mock(get_cog=Mock(return_value=rotation))
+        owner.guild = SimpleNamespace(id=self.guild, owner_id=900, get_member=Mock(return_value=True))
+        owner.user.guild_permissions = owner.permissions
+        owner.edit_original_response = AsyncMock()
+        public = await profile_card(owner, land_id=land["id"])
+        button = next(b for b in public["view"].children if b.label == "Member management")
+        await button.callback(owner)
+        opened = owner.followup.send.await_args.kwargs
+        self.assertTrue(opened["ephemeral"])
+        view = opened["view"]
+        self.assertTrue(all(b.disabled for b in [view.add, view.remove, view.promote]))
+        self.assertFalse(await view.interaction_check(interaction(self.guild, user=77)))
+        wrong_channel = interaction(self.guild)
+        wrong_channel.channel_id += 1
+        self.assertFalse(await view.interaction_check(wrong_channel))
+
+        player = SimpleNamespace(id=42, guild=owner.guild)
+        with patch.object(type(view.person), "values", new_callable=unittest.mock.PropertyMock, return_value=[player]):
+            await view.person.callback(owner)
+        def screen():
+            return owner.edit_original_response.await_args.kwargs["view"]
+        self.assertFalse(screen().add.disabled)
+        self.assertTrue(screen().remove.disabled)
+        await screen().add.callback(owner)
+        self.assertEqual(await db.get_members(land["id"]), [42])
+        self.assertTrue(screen().add.disabled)
+        await screen().promote.callback(owner)
+        self.assertEqual(await db.get_officers(land["id"]), [42])
+        self.assertTrue(screen().promote.disabled)
+        self.assertIn("ends their appointment", owner.edit_original_response.await_args.kwargs["embed"].description)
+        await screen().remove.callback(owner)
+        self.assertEqual(await db.get_members(land["id"]), [])
+        self.assertEqual(await db.get_officers(land["id"]), [])
+        self.assertEqual(rotation.refresh_allowed_reactors.await_count, 2)
+        await screen().profile.callback(owner)
+        self.assertEqual(owner.edit_original_response.await_args.kwargs["embed"].title, "Coppercross")
+        self.assertIsNone(owner.edit_original_response.await_args.kwargs["content"])
+
+    async def test_roster_rechecks_current_owner_staff_and_selected_land(self):
+        land = await self.land()
+        other = await self.land(owner=11, name="Elsewhere")
+        await db.add_officer(land["id"], 44)
+        viewer = interaction(self.guild, user=44)
+        viewer.guild = SimpleNamespace(id=self.guild, owner_id=900, get_member=Mock(return_value=True))
+        viewer.user.guild_permissions = viewer.permissions
+        viewer.edit_original_response = AsyncMock()
+        profile = await profile_card(viewer, land_id=land["id"], directory_page=2, private=True)
+        button = next(b for b in profile["view"].children if b.label == "Member management")
+        await button.callback(viewer)
+        self.assertIsNone(viewer.edit_original_response.await_args.kwargs["view"])
+        await db.set_config(self.guild, "staff_role_id", "81")
+        viewer.user.roles = [SimpleNamespace(id=81)]
+        await button.callback(viewer)
+        view = viewer.edit_original_response.await_args.kwargs["view"]
+        target = SimpleNamespace(id=11, guild=viewer.guild)
+        with patch.object(type(view.person), "values", new_callable=unittest.mock.PropertyMock, return_value=[target]):
+            await view.person.callback(viewer)
+        selected = viewer.edit_original_response.await_args.kwargs["view"]
+        self.assertTrue(selected.add.disabled)
+        self.assertFalse(selected.promote.disabled)
+        self.assertIn(other["name"], viewer.edit_original_response.await_args.kwargs["embed"].description)
+        # Recheck staff status and ownership even when a previous screen offered the action.
+        target.id = 55
+        with patch.object(type(selected.person), "values", new_callable=unittest.mock.PropertyMock, return_value=[target]):
+            await selected.person.callback(viewer)
+        ready = viewer.edit_original_response.await_args.kwargs["view"]
+        self.assertFalse(ready.add.disabled)
+        viewer.user.roles = []
+        await ready.add.callback(viewer)
+        self.assertIsNone(viewer.edit_original_response.await_args.kwargs["view"])
+        self.assertEqual(await db.get_members(land["id"]), [])
+        # The former owner's open screen loses access after a transfer, too.
+        await db.update_land_owner(land["id"], viewer.user.id)
+        await button.callback(viewer)
+        view = viewer.edit_original_response.await_args.kwargs["view"]
+        with patch.object(type(view.person), "values", new_callable=unittest.mock.PropertyMock, return_value=[target]):
+            await view.person.callback(viewer)
+        ready = viewer.edit_original_response.await_args.kwargs["view"]
+        await db.update_land_owner(land["id"], 12)
+        await ready.promote.callback(viewer)
+        self.assertIsNone(viewer.edit_original_response.await_args.kwargs["view"])
+        self.assertFalse(await db.is_officer(land["id"], target.id))
+        with self.assertRaisesRegex(ValueError, "registered here"):
+            await db.change_land_roster(self.guild + 1, land["id"], 44, staff=True, user_id=55, action="add")
+
+    async def test_roster_commands_and_competing_registrations(self):
+        land = await self.land()
+        other = await self.land(owner=11, name="Elsewhere")
+        actor = interaction(self.guild, user=900, admin=True)
+        actor.user.guild_permissions = actor.permissions
+        actor.guild = SimpleNamespace(id=self.guild)
+        actor.client = Mock(get_cog=Mock(return_value=None))
+        cog = LandCog(actor.client)
+        target = SimpleNamespace(id=42)
+        await cog.officer_add.callback(cog, actor, target, land["name"])
+        self.assertEqual(await db.get_members(land["id"]), [42])
+        self.assertEqual(await db.get_officers(land["id"]), [42])
+        await cog.member_add.callback(cog, actor, target, other["name"])
+        self.assertIn("already belongs", actor.followup.send.await_args.args[0])
+        # The existing officer command also enrolls officers serving outside their home settlement.
+        await cog.officer_add.callback(cog, actor, target, other["name"])
+        self.assertEqual(await db.get_officers(other["id"]), [42])
+        self.assertEqual(await db.get_officers(land["id"]), [42])
+        await cog.member_remove.callback(cog, actor, target, land["name"])
+        self.assertEqual(await db.get_officers(land["id"]), [])
+        results = await asyncio.gather(
+            db.change_land_roster(self.guild, land["id"], 10, staff=False, user_id=43, action="add"),
+            db.change_land_roster(self.guild, other["id"], 11, staff=False, user_id=43, action="add"),
+            return_exceptions=True)
+        self.assertEqual(sum(isinstance(result, ValueError) for result in results), 1)
+        memberships = await db.get_members(land["id"]) + await db.get_members(other["id"])
+        self.assertEqual(sorted(memberships), [42, 43])
+
     async def test_player_picker_first_deposit_receipt_replay_and_private_statement(self):
         admin = interaction(self.guild, user=900, admin=True, request_id=982)
         admin.edit_original_response = AsyncMock()
