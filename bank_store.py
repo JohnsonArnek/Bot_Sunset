@@ -188,7 +188,8 @@ async def adjust(guild, actor, amount, reason, *, admin, request_id, withdraw=Fa
         return await _record(conn, guild, actor, request_id, action, reason, receipt, [(row["id"], delta, after)])
 
 
-async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"):
+async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal",
+                    allocation_id=None, quote=None):
     import banner_store
     import banner_account
     if kind not in ("normal", "reserve", "leftover") or payment not in ("manual", "bank"):
@@ -196,11 +197,18 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
     async with write(guild) as conn:
         prior = await _replay(conn, guild, actor, request_id, f"claim-{kind}")
         if prior:
+            if allocation_id is not None and prior.get("claim_request_id") != allocation_id:
+                raise ValueError("This receipt belongs to another allocation.")
             if prior["payment"] != payment:
                 raise ValueError("This interaction already used a different payment method.")
             return prior
         lock = " FOR UPDATE" if db.IS_POSTGRES else ""
-        land = await conn.fetchone("SELECT * FROM lands WHERE guild_id=? AND owner_id=? ORDER BY id LIMIT 1" + lock, (guild, actor))
+        land_sql = "SELECT * FROM lands WHERE guild_id=? AND owner_id=?"
+        params = (guild, actor)
+        if allocation_id is not None:
+            land_sql += " AND id=(SELECT land_id FROM claim_requests WHERE id=?)"
+            params += (allocation_id,)
+        land = await conn.fetchone(land_sql + " ORDER BY id LIMIT 1" + lock, params)
         if not land:
             raise ValueError("Only the registered land owner can purchase claim blocks.")
         at = now()
@@ -212,11 +220,16 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
             used = await conn.fetchone("SELECT id FROM purchases WHERE land_id=? AND type='normal' AND purchased_at>=? LIMIT 1", (land["id"], monday))
             if used:
                 raise ValueError("This land already used its normal purchase this week. The allowance resets Monday at 00:00 UTC.")
-            approved = await conn.fetchone("SELECT * FROM claim_requests WHERE land_id=? AND status='approved' ORDER BY requested_at,id LIMIT 1" + lock, (land["id"],))
+            approval_sql = "SELECT * FROM claim_requests WHERE land_id=? AND status='approved'"
+            params = (land["id"],)
+            if allocation_id is not None:
+                approval_sql += " AND id=?"
+                params += (allocation_id,)
+            approved = await conn.fetchone(approval_sql + " ORDER BY requested_at,id LIMIT 1" + lock, params)
             if not approved:
                 raise ValueError("No approved claim request is available. Submit /claim request and wait for approval.")
-            # Eligibility follows the saved status. The expiry worker uses a
-            # conditional update so its earlier scan cannot undo this checkout.
+            if approved["approved_at"] and at >= datetime.fromisoformat(approved["approved_at"]) + timedelta(days=7):
+                raise ValueError("This allocation expired. Use /queue to see current requests.")
             blocks = approved["chunks_requested"]
         else:
             await conn.execute("INSERT INTO reserve (guild_id,total_blocks,protected_min,leftover_blocks) VALUES (?,0,3,0) ON CONFLICT DO NOTHING", (guild,))
@@ -229,6 +242,8 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
             raise ValueError("The configured price or recorded chunk count is invalid; ask an administrator to review it.")
         unit = models.reserve_price(full_price) if kind == "reserve" else models.block_price(land["chunks"], full_price)
         total = unit * blocks
+        if quote is not None and quote != (blocks, unit):
+            raise ValueError("Your allocation or price changed. Open My allocation in /queue to see the current price.")
         if total > 2_000_000_000:
             raise ValueError("This purchase exceeds the supported transaction amount.")
         week = await banner_account.ensure_week(conn, guild, at)
@@ -260,6 +275,7 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
         note = f"{kind.title()} claim: {blocks} block(s) x {unit} ems = {total} ems; {'bank paid' if payment == 'bank' else 'manual payment'}"
         owed_entry_id = await db.record_ledger_entry(conn,land["id"],guild,"owed",blocks,note,actor,at)
         receipt = dict(land_id=land["id"], land_name=land["name"], blocks=blocks, chunks=land["chunks"] + blocks,
+                       claim_request_id=approved["id"] if approved else None,
                        unit_price=unit, total=total, payment=payment, balance=after, kind=kind, banner=banner,
                        sale_result=total-blocks*full_price, released_blocks=released, owed_entry_id=owed_entry_id)
         result = await _record(conn, guild, actor, request_id, f"claim-{kind}", note, receipt, entries)

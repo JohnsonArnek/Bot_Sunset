@@ -10,19 +10,7 @@ from discord.ext import commands
 import database as db
 import models
 import bank_store
-
-
-async def _is_staff(interaction: discord.Interaction) -> bool:
-    """Check if the invoking user has staff permissions on this server."""
-    if not interaction.guild:
-        return False
-    if interaction.user.guild_permissions.administrator:
-        return True
-    staff_role_id = await db.get_staff_role_id(interaction.guild_id)
-    if staff_role_id == 0:
-        owner_id = interaction.guild.owner_id or (interaction.guild.owner.id if interaction.guild.owner else None)
-        return interaction.user.id == owner_id
-    return any(r.id == staff_role_id for r in getattr(interaction.user, "roles", []))
+from cogs.weekly_offers import OfferAction, review_request
 
 
 class ClaimsCog(commands.GroupCog, name="claim"):
@@ -31,6 +19,12 @@ class ClaimsCog(commands.GroupCog, name="claim"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         super().__init__()
+
+    async def cog_load(self):
+        self.bot.add_dynamic_items(OfferAction)
+
+    async def cog_unload(self):
+        self.bot.remove_dynamic_items(OfferAction)
 
     # ── /claim request ────────────────────────────────────────────────
 
@@ -168,53 +162,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
     @app_commands.describe(land_name="Name of the land to approve")
     @app_commands.guild_only()
     async def claim_approve(self, interaction: discord.Interaction, land_name: str):
-        await interaction.response.defer()
-
-        if not await _is_staff(interaction):
-            return await interaction.followup.send(
-                "🔒 Staff only.", ephemeral=True
-            )
-
-        land = await db.get_land_by_name(interaction.guild_id, land_name)
-        if not land:
-            return await interaction.followup.send(
-                f"❌ Land **{land_name}** not found on this server.", ephemeral=True
-            )
-
-        pending = await db.get_pending_request(land["id"])
-        if not pending:
-            return await interaction.followup.send(
-                f"❌ **{land_name}** has no pending claim request.", ephemeral=True
-            )
-
-        if not await db.update_request_status(pending["id"], "approved"):
-            return await interaction.followup.send("This request changed; refresh before acting.", ephemeral=True)
-
-        full_cost = await db.get_full_block_cost(interaction.guild_id)
-        price = models.block_price(land["chunks"], full_cost)
-
-        embed = discord.Embed(
-            title="✅ Claim Request Approved",
-            colour=discord.Colour.green(),
-        )
-        embed.add_field(name="Land", value=land["name"], inline=True)
-        embed.add_field(name="Chunks Requested", value=str(pending["chunks_requested"]), inline=True)
-        embed.add_field(name="Purpose", value=pending["purpose"].title(), inline=True)
-        embed.add_field(name="Price", value=f"{price} ems" if price > 0 else "Free", inline=True)
-        embed.set_footer(text=f"Approved by {interaction.user.display_name}")
-
-        await interaction.followup.send(embed=embed)
-
-        # Notify the land owner
-        try:
-            owner = await interaction.guild.fetch_member(land["owner_id"])
-            if owner:
-                await owner.send(
-                    f"✅ Your claim request for **{land['name']}** on **{interaction.guild.name}** has been approved! "
-                    f"Use `/claim buy` to complete the purchase."
-                )
-        except discord.Forbidden:
-            pass
+        await review_request(interaction, name=land_name, approve=True, private=False)
 
     # ── /claim deny ───────────────────────────────────────────────────
 
@@ -227,49 +175,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         land_name: str,
         reason: str = "No reason given.",
     ):
-        await interaction.response.defer()
-
-        if not await _is_staff(interaction):
-            return await interaction.followup.send(
-                "🔒 Staff only.", ephemeral=True
-            )
-
-        land = await db.get_land_by_name(interaction.guild_id, land_name)
-        if not land:
-            return await interaction.followup.send(
-                f"❌ Land **{land_name}** not found on this server.", ephemeral=True
-            )
-
-        pending = await db.get_pending_request(land["id"])
-        if not pending:
-            return await interaction.followup.send(
-                f"❌ **{land_name}** has no pending claim request.", ephemeral=True
-            )
-
-        if not await db.update_request_status(pending["id"], "denied"):
-            return await interaction.followup.send("This request changed; refresh before acting.", ephemeral=True)
-
-        embed = discord.Embed(
-            title="❌ Claim Request Denied",
-            colour=discord.Colour.red(),
-        )
-        embed.add_field(name="Land", value=land["name"], inline=True)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.set_footer(text=f"Denied by {interaction.user.display_name}")
-
-        await interaction.followup.send(embed=embed)
-
-        # Notify the land owner
-        try:
-            owner = await interaction.guild.fetch_member(land["owner_id"])
-            if owner:
-                await owner.send(
-                    f"❌ Your claim request for **{land['name']}** on **{interaction.guild.name}** was denied.\n"
-                    f"**Reason:** {reason}"
-                )
-        except discord.Forbidden:
-            pass
-
+        await review_request(interaction, name=land_name, approve=False, reason=reason, private=False)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ClaimsCog(bot))
