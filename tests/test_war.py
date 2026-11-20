@@ -217,6 +217,105 @@ class WarFlow(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_depot_changes(self):
         await check_atomic_depot_changes(self, self.guild)
 
+    async def test_depot_stock_forms_apply_mixed_units_once_and_recheck_permissions(self):
+        await self.cog.stock_set.callback(self.cog, self.admin, "Keep", hay="1")
+        depot = self.admin.followup.send.await_args.kwargs["view"]
+        await depot.add.callback(self.admin)
+        form = self.admin.response.send_modal.await_args.args[0]
+        self.assertEqual(set(form.fields), set(stock.RESOURCES))
+        for key, value in {"hay": "1 double chest", "diamonds": "2 blocks + 1", "logs": "1 stack", "arrows": "4"}.items():
+            form.fields[key]._value = value
+        self.admin.permissions = discord.Permissions.none()
+        await form.on_submit(self.admin)
+        self.assertEqual((await stock.available(self.guild, "Keep"))["hay"], 1)
+        self.admin.permissions = discord.Permissions(administrator=True)
+        await asyncio.gather(form.on_submit(self.admin), form.on_submit(self.admin))
+        balance = await stock.available(self.guild, "Keep")
+        self.assertEqual(balance, dict(hay=3457, diamonds=19, iron=0, arrows=4, logs=64))
+        receipt = self.admin.edit_original_response.await_args.kwargs
+        self.assertIn("Added", receipt["embed"].description)
+        self.assertIn("double chest", receipt["embed"].description)
+        await receipt["view"].withdraw.callback(self.admin)
+        withdrawal = self.admin.response.send_modal.await_args.args[0]
+        withdrawal.fields["arrows"]._value, withdrawal.fields["iron"]._value = "1", "1"
+        await withdrawal.on_submit(self.admin)
+        self.assertEqual(await stock.available(self.guild, "Keep"), balance)
+        withdrawal.fields["iron"]._value = ""
+        self.admin.edit_original_response.side_effect = TimeoutError()
+        await withdrawal.on_submit(self.admin)
+        await withdrawal.on_submit(self.admin)
+        self.assertEqual((await stock.available(self.guild, "Keep"))["arrows"], 3)
+        self.assertIn("Withdrew", self.admin.followup.send.await_args.kwargs["embed"].description)
+
+    async def test_transport_mode_changes_keep_original_manifest_rules_time_and_fleet(self):
+        await stock.set_stock(self.guild, "Hidden depot", hay=40*64)
+        await self.cog.stock_list.callback(self.cog, self.admin, location="Hidden depot")
+        depot = self.admin.followup.send.await_args.kwargs["view"]
+        await depot.transport.callback(self.admin)
+        view = self.admin.edit_original_response.await_args.kwargs["view"]
+        await view.journey.callback(self.admin)
+        form = self.admin.response.send_modal.await_args.args[0]
+        form.minutes._value, form.fleet._value = "12", "2"
+        await form.on_submit(self.admin)
+        view = self.admin.response.edit_message.await_args.kwargs["view"]
+        self.assertIn("1h 16m", view.text)
+        await stock.set_stock(self.guild, "Hidden depot", hay=0)
+        await stock.configure(self.guild, {"chest_boat_slots": 1})
+        for mode, expected in (("chest_minecart", "2 chest minecarts"), ("chest_boat", "2 chest boats")):
+            view.mode._values = [mode]
+            await view.mode.callback(self.admin)
+            result = self.admin.response.edit_message.await_args.kwargs
+            view = result["view"]
+            self.assertIn(expected, view.text)
+            self.assertIn("Delivery: 32m", view.text)
+            self.assertNotIn("Hidden depot", view.text)
+            self.assertTrue(next(o for o in view.mode.options if o.value == mode).default)
+            if mode == "chest_minecart":
+                await view.journey.callback(self.admin)
+                self.assertIsNone(self.admin.response.send_modal.await_args.args[0].fleet)
+        self.assertEqual(view.shipment.hay, 2560)
+
+    async def test_conquest_button_plans_only_required_shipment_and_shares_no_stock(self):
+        await stock.set_stock(self.guild, "Private vault", hay=5000, iron=999, arrows=777, diamonds=36, logs=3)
+        await self.cog.stock_list.callback(self.cog, self.admin, location="Private vault")
+        depot = self.admin.followup.send.await_args.kwargs["view"]
+        await depot.conquest.callback(self.admin)
+        form = self.admin.response.send_modal.await_args.args[0]
+        form.hp._value, form.players._value = "2400", "5"
+        await form.on_submit(self.admin)
+        result = self.admin.edit_original_response.await_args.kwargs
+        self.assertIn("Enough supplies", response_text(self.admin.edit_original_response.await_args))
+        view = result["view"]
+        await view.plan.callback(self.admin)
+        shipment = self.admin.response.send_message.await_args.kwargs
+        self.assertTrue(shipment["ephemeral"])
+        cargo = shipment["view"].shipment
+        self.assertEqual((cargo.hay, cargo.diamonds, cargo.logs, cargo.iron), (7, 36, 3, 0))
+        self.assertEqual((await stock.available(self.guild, "Private vault"))["hay"], 5000)
+        await shipment["view"].share.callback(self.admin)
+        sent = self.admin.response.send_message.await_args
+        self.assertFalse(sent.kwargs["ephemeral"])
+        for secret in ("Private vault", "5,000", "999", "777", "Enough supplies"):
+            self.assertNotIn(secret, response_text(sent))
+
+    async def test_old_route_form_cannot_replace_a_new_plan_or_bypass_admin_access(self):
+        await self.cog.logistics.callback(self.cog, self.admin)
+        view = self.admin.followup.send.await_args.kwargs["view"]
+        await view.journey.callback(self.admin)
+        form = self.admin.response.send_modal.await_args.args[0]
+        form.minutes._value, form.fleet._value = "NaN", "1"
+        await form.on_submit(self.admin)
+        self.admin.response.edit_message.assert_not_awaited()
+        form.minutes._value = "15"
+        self.admin.permissions = discord.Permissions.none()
+        await form.on_submit(self.admin)
+        self.admin.response.edit_message.assert_not_awaited()
+        self.admin.permissions = discord.Permissions(administrator=True)
+        view.mode._values = ["chest_boat"]
+        await view.mode.callback(self.admin)
+        await form.on_submit(self.admin)
+        self.admin.response.edit_message.assert_awaited_once()
+
     async def test_depot_directory_and_autocomplete_scope(self):
         for name in ("A", "B", "C", "D%"):
             await stock.set_stock(self.guild,name,logs=1)

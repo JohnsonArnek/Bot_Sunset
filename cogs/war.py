@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from decimal import Decimal
 from typing import Literal
 
 import discord
@@ -12,8 +11,9 @@ from discord.ext import commands
 import war_store as stock
 from cogs.report_view import NO_MENTIONS, ReportView, clip
 from cogs.war_share import ShareEstimate, message_payload
-from war_display import assumptions, duration, inventory, quantity
-from war_planner import IRON_PER_BLOCK, block_shipment, defence_transfer, delivery_time, estimate, pack, plan_transport, stock_quantity
+from war_display import duration, inventory, quantity
+from cogs.war_plans import Route, SHARE_FOOTER, label, load_plan, whole_number
+from war_planner import IRON_PER_BLOCK, defence_transfer, stock_quantity
 
 
 Quantity = app_commands.Range[str, 1, 100]
@@ -31,13 +31,9 @@ async def reply(interaction, text):
 async def send_report(interaction, embed, *, share_text=None, view=None):
     if share_text is not None:
         view = ShareEstimate(interaction, share_text)
-        embed.set_footer(text="Estimate only. Share publishes the calculation and its assumptions. Depot names and stock checks stay private.")
+        embed.set_footer(text=SHARE_FOOTER)
     controls = {"view": view} if view is not None else {}
     await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_MENTIONS, **controls)
-
-
-def label(location):
-    return discord.utils.escape_markdown(stock.clean_location(location))
 
 
 def depot_embed(location, row, rules, change=None):
@@ -55,7 +51,7 @@ async def depot_report(interaction, page, selection):
     if selection is not None:
         row = await stock.available(guild, selection)
         if row is not None:
-            return depot_embed(selection, row, rules), ReportView(interaction, depot_report, page, 1, selection=selection)
+            return depot_embed(selection, row, rules), DepotActions(interaction, page, selection)
     overview = await stock.stock_overview(guild)
     pages = max(1, (overview["depots"]+2)//3)
     page = min(max(1, page), pages)
@@ -87,60 +83,6 @@ async def depot_choices(interaction, current):
             if len(r["location"].encode("utf-16-le")) <= 200]
 
 
-def supply(resource, needed, held, rules):
-    balance = held - needed
-    detail = (f"Left: {quantity(balance, resource, rules)}" if balance >= 0
-              else f"Short: {quantity(-balance, resource, rules)}")
-    return f"{resource.title()} available: {quantity(held, resource, rules)} · {detail}"
-
-
-def units(n, singular, plural):
-    return f"{n:,} {singular if n == 1 else plural}"
-
-
-def transport(cargo, journey):
-    if journey.mode == "chest_minecart":
-        return (f"{units(cargo.slots, 'slot', 'slots')} · "
-                f"{units(journey.carriers, 'chest minecart', 'chest minecarts')} needed · "
-                f"{units(journey.trips, 'rail dispatch', 'rail dispatches')}. "
-                "Prepared rail route and enough carts assumed; all cargo sent together, no return trips.")
-    single, plural = {"donkey": ("donkey", "donkeys"), "chest_boat": ("chest boat", "chest boats")}[journey.mode]
-    return (f"{units(cargo.slots, 'slot', 'slots')} · {units(journey.carriers, single, plural)} "
-            f"({journey.slots_per_carrier} slots each) · {journey.loads:,} carrier loads · "
-            f"**{units(journey.trips, 'outbound trip', 'outbound trips')}**, "
-            f"{units(max(0, journey.trips - 1), 'return', 'returns')}.")
-
-
-def packing_assumptions(rules):
-    return (f"**Packing** · {rules.stack_size}/stack · slots per donkey {rules.donkey_slots}, "
-            f"chest boat {rules.chest_boat_slots}, chest minecart {rules.chest_minecart_slots}, "
-            f"chest {rules.chest_slots}, double chest {rules.double_chest_slots}. "
-            "Diamonds and iron travel in blocks with separate slots for loose items.\n"
-            f"**Each trip** · load {duration(rules.loading_minutes * 60)} + unload "
-            f"{duration(rules.unloading_minutes * 60)} for the convoy. Supplies start together. Travel time excludes crafting.")
-
-
-def storage(cargo):
-    return (f"{units(cargo.single_chests, 'single chest', 'single chests')} or "
-            f"{units(cargo.double_chests, 'double chest', 'double chests')}")
-
-
-def route_summary(rules, travel_minutes, journey, *, combat=None):
-    if journey.trips == 0:
-        return "No cargo to deliver: 0m loading, travel or unloading."
-    if travel_minutes is None:
-        return "Add travel_minutes for depot-to-objective timing."
-    trips = journey.trips
-    route = delivery_time(rules, travel_minutes, trips)
-    lines = [f"**Delivery: {duration(route.seconds)}** · {units(trips, 'outbound trip', 'outbound trips')}, "
-             f"{units(trips - 1, 'return', 'returns')} · {duration(Decimal(str(travel_minutes)) * 60)} one way",
-             f"Load {duration(route.loading)} + travel {duration(route.travel)} + unload {duration(route.unloading)}."]
-    if combat is not None:
-        lines.append(f"**Depot to conquest if supplied: {duration(route.with_combat(combat))}** "
-                     f"(delivery + {duration(combat)} combat).")
-    return "\n".join(lines)
-
-
 route_options = app_commands.describe(
     travel_minutes="One-way depot-to-objective travel in minutes; omit to skip timing",
     mode="Transport mode; chest minecarts send all cargo in one rail dispatch",
@@ -160,8 +102,121 @@ depot_options = app_commands.describe(
 
 async def depot_counts(guild_id, **entries):
     rules = await stock.rules_for(guild_id)
-    return {key: stock_quantity(text, rules, iron=key == "iron", diamonds=key == "diamonds")
-            for key, text in entries.items() if text is not None}
+    counts = {key: stock_quantity(text, rules, iron=key == "iron", diamonds=key == "diamonds")
+              for key, text in entries.items() if text is not None}
+    return counts, rules
+
+
+async def adjust_depot(guild, location, withdraw, entries):
+    counts, rules = await depot_counts(guild, **entries)
+    deltas = {k: -n if withdraw else n for k, n in counts.items()}
+    balance = await stock.adjust_stock(guild, location, **deltas)
+    changed = " and ".join(quantity(n, k, rules) for k, n in counts.items() if n)
+    return depot_embed(balance["location"], balance, rules, f"{'Withdrew' if withdraw else 'Added'} {changed}.")
+
+
+class DepotActions(ReportView):
+    def __init__(self, interaction, page, location):
+        super().__init__(interaction, depot_report, page, 1, selection=location)
+
+    async def can_act(self, interaction):
+        if not await self.interaction_check(interaction):
+            return False
+        if not interaction.permissions.administrator:
+            await interaction.response.send_message("Only Discord administrators can manage depots or plan shipments.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Add supplies", style=discord.ButtonStyle.success, row=0)
+    async def add(self, interaction, button):
+        if await self.can_act(interaction):
+            await interaction.response.send_modal(StockForm(self, withdraw=False))
+
+    @discord.ui.button(label="Withdraw supplies", row=0)
+    async def withdraw(self, interaction, button):
+        if await self.can_act(interaction):
+            await interaction.response.send_modal(StockForm(self, withdraw=True))
+
+    @discord.ui.button(label="Plan transport", style=discord.ButtonStyle.primary, row=0)
+    async def transport(self, interaction, button):
+        await self.open_plan(interaction)
+
+    @discord.ui.button(label="Conquest estimate", row=0)
+    async def conquest(self, interaction, button):
+        if await self.can_act(interaction):
+            await interaction.response.send_modal(ConquestForm(self))
+
+    async def open_plan(self, interaction, objective=None):
+        if not await self.can_act(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            embed, view = await load_plan(interaction, self.selection, Route(), objective)
+        except ValueError as exc:
+            return await reply(interaction, str(exc))
+        await interaction.edit_original_response(embed=embed, view=view, allowed_mentions=NO_MENTIONS)
+
+
+class StockForm(discord.ui.Modal):
+    def __init__(self, depot, *, withdraw):
+        verb = "Withdraw" if withdraw else "Add"
+        super().__init__(title=clip(f"{verb} supplies · {depot.selection}", 45), timeout=300)
+        self.depot, self.withdraw = depot, withdraw
+        examples = {"hay": "2 single chests + 3 stacks", "diamonds": "1 chest of diamond blocks",
+                    "iron": "2 blocks + 5 ingots", "arrows": "2 stacks + 4", "logs": "1 double chest"}
+        self.fields = {}
+        for resource in stock.RESOURCES:
+            field = discord.ui.TextInput(label=resource.title(), placeholder=examples[resource], required=False, max_length=100)
+            self.fields[resource] = field
+            self.add_item(field)
+
+    async def on_submit(self, interaction):
+        depot = self.depot
+        if not await depot.can_act(interaction):
+            return
+        depot.busy = True
+        try:
+            await interaction.response.defer()
+            entries = {key: field.value.strip() for key, field in self.fields.items() if field.value.strip()}
+            try:
+                embed = await adjust_depot(depot.guild, depot.selection, self.withdraw, entries)
+            except ValueError as exc:
+                return await reply(interaction, str(exc))
+            # Retire every form opened from the old view before sending the receipt.
+            depot.stop()
+            view = DepotActions(interaction, depot.page, depot.selection)
+            try:
+                await interaction.edit_original_response(content=None, embed=embed, view=view, allowed_mentions=NO_MENTIONS)
+            except (discord.HTTPException, OSError, TimeoutError):
+                view.stop()
+                await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_MENTIONS)
+        finally:
+            depot.busy = False
+
+    async def on_error(self, interaction, error):
+        self.depot.stop()
+        logging.getLogger(__name__).error("Depot stock form failed", exc_info=error)
+        send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        await send("Reopen /war stock-list and check the depot balance before entering the change again.", ephemeral=True)
+
+
+class ConquestForm(discord.ui.Modal, title="Estimate a conquest"):
+    hp = discord.ui.TextInput(label="Remaining settlement HP", max_length=10)
+    players = discord.ui.TextInput(label="Players", max_length=7)
+
+    def __init__(self, depot):
+        super().__init__(timeout=300)
+        self.depot = depot
+
+    async def on_submit(self, interaction):
+        if not await self.depot.can_act(interaction):
+            return
+        try:
+            hp = whole_number(self.hp.value, "settlement HP", 2_000_000_000)
+            players = whole_number(self.players.value, "players", 1_000_000)
+        except ValueError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await self.depot.open_plan(interaction, (hp, players))
 
 
 @app_commands.guild_only()
@@ -183,12 +238,12 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
     async def stock_set(self, interaction: discord.Interaction, location: Location, hay: Quantity = None,
                         diamonds: Quantity = None, iron: Quantity = None, arrows: Quantity = None, logs: Quantity = None):
         try:
-            counts = await depot_counts(interaction.guild_id, hay=hay, diamonds=diamonds, iron=iron, arrows=arrows, logs=logs)
+            counts, rules = await depot_counts(interaction.guild_id, hay=hay, diamonds=diamonds, iron=iron, arrows=arrows, logs=logs)
             row = await stock.set_stock(interaction.guild_id, location, **counts)
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        rules = await stock.rules_for(interaction.guild_id)
-        await send_report(interaction, depot_embed(row["location"], row, rules, "Stock count recorded."))
+        await send_report(interaction, depot_embed(row["location"], row, rules, "Stock count recorded."),
+                          view=DepotActions(interaction, 1, row["location"]))
 
     @app_commands.command(name="stock-add", description="Add a delivery of resources to an existing depot")
     @depot_options
@@ -208,15 +263,10 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
 
     async def _adjust(self, interaction, location, *, withdraw, **entries):
         try:
-            counts = await depot_counts(interaction.guild_id, **entries)
-            sign = -1 if withdraw else 1
-            balance = await stock.adjust_stock(interaction.guild_id, location, **{k: sign * n for k, n in counts.items()})
+            embed = await adjust_depot(interaction.guild_id, location, withdraw, entries)
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        rules = await stock.rules_for(interaction.guild_id)
-        changed = " and ".join(quantity(n, k, rules) for k, n in counts.items() if n)
-        await send_report(interaction, depot_embed(balance["location"], balance, rules,
-                                                  f"{'Withdrew' if withdraw else 'Added'} {changed}."))
+        await send_report(interaction, embed, view=DepotActions(interaction, 1, location))
 
     @app_commands.command(name="stock-remove", description="Remove one location and its stock from this server's reserves")
     @app_commands.autocomplete(location=depot_choices)
@@ -249,30 +299,10 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
     async def logistics(self, interaction: discord.Interaction, location: Location = None,
                         travel_minutes: Minutes = None, mode: Mode = "donkey", carriers: PositiveCount = 1):
         try:
-            held = await stock.available(interaction.guild_id, location)
+            embed, view = await load_plan(interaction, location, Route(mode, carriers, travel_minutes))
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        if held is None:
-            return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
-        rules = await stock.rules_for(interaction.guild_id)
-        cargo = pack(rules, hay=held["hay"], diamonds=held["diamonds"], iron=held["iron"], logs=held["logs"])
-        try:
-            journey = plan_transport(cargo, rules, mode, carriers)
-            route = route_summary(rules, travel_minutes, journey)
-        except ValueError as exc:
-            return await reply(interaction, str(exc))
-        scope = label(location) if location is not None else "all depots, if pooled"
-        conditions = f"**Assumptions**\n{packing_assumptions(rules)}\nArrows excluded (inventory only)."
-        loads = transport(cargo, journey)
-        space = storage(cargo)
-        public = f"{conditions}\n**Packing estimate**\nTransport: {loads}\nStorage: {space}.\n{route}"
-        manifest = "\n".join(f"{k.title()}: {quantity(held[k], k, rules)}" for k in ("hay", "diamonds", "iron", "logs"))
-        embed = discord.Embed(title="Transport estimate", description=conditions, colour=discord.Colour.teal())
-        embed.add_field(name="Transport", value=loads, inline=False)
-        embed.add_field(name="Storage", value=space, inline=False)
-        embed.add_field(name="Journey time", value=route, inline=False)
-        embed.add_field(name=clip(f"Private manifest · {scope}", 256), value=manifest, inline=False)
-        await send_report(interaction, embed, share_text=public)
+        await send_report(interaction, embed, view=view)
 
     @app_commands.command(description="Estimate transferable defence from iron; optionally check a target amount")
     @app_commands.describe(location="Use this depot; omit to pool all iron on this server",
@@ -375,44 +405,10 @@ class WarCog(commands.GroupCog, name="war", group_description="Manage strategic 
                           players: PositiveCount, location: Location = None,
                           travel_minutes: Minutes = None, mode: Mode = "donkey", carriers: PositiveCount = 1):
         try:
-            held = await stock.available(interaction.guild_id, location)
+            embed, view = await load_plan(interaction, location, Route(mode, carriers, travel_minutes), (hp, players))
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        if held is None:
-            return await reply(interaction, "No such reserve location on this server. See /war stock-list.")
-        rules = await stock.rules_for(interaction.guild_id)
-        plan = estimate(hp, players, rules)
-        shipped_diamonds = block_shipment(plan.diamonds)
-        raw = pack(rules, hay=plan.hay, diamonds=shipped_diamonds, logs=plan.logs)
-        try:
-            journey = plan_transport(raw, rules, mode, carriers)
-            route = route_summary(rules, travel_minutes, journey, combat=plan.seconds)
-        except ValueError as exc:
-            return await reply(interaction, str(exc))
-        enough = (held["diamonds"] >= shipped_diamonds and held["hay"] >= plan.hay and held["logs"] >= plan.logs)
-        verdict = "Enough supplies" if enough else "Insufficient supplies"
-        scope = label(location) if location is not None else "all reserve locations"
-        conditions = f"{assumptions(rules)}\n{packing_assumptions(rules)}"
-        title = f"Conquest estimate · {hp:,} HP · {players:,} players"
-        timing = (f"**Time if equipped: {duration(plan.seconds)}** from first hit to last.\n"
-                  f"{plan.attackers:,} active attackers · {plan.hits:,} hits across {plan.volleys:,} volleys")
-        shipment = (f"Diamonds: {quantity(shipped_diamonds, 'diamonds', rules)} "
-                    f"({plan.diamonds:,} used for {plan.axes:,} axes, {shipped_diamonds - plan.diamonds} spare diamonds)\n"
-                    f"{quantity(plan.logs, 'logs', rules)} ({plan.planks:,} planks consumed, {plan.sticks:,} sticks needed)\n"
-                    f"{quantity(plan.hay, 'hay', rules)} → {quantity(plan.bread, 'bread', rules)} needed\n"
-                    "Craft axes and bread at the objective.")
-        loads = f"{transport(raw, journey)}\nStorage: {storage(raw)}."
-        public = f"{conditions}\n**{title}**\n{timing}\n**Shipment**\n{shipment}\n**Transport and storage**\n{loads}\n{route}"
-        private = "\n".join(supply(k, needed, held[k], rules) for k, needed in
-                            (("diamonds", shipped_diamonds), ("hay", plan.hay), ("logs", plan.logs)))
-        embed = discord.Embed(title=title, description=conditions,
-                              colour=discord.Colour.green() if enough else discord.Colour.orange())
-        embed.add_field(name=f"Private stock check · {verdict}", value=f"{scope}\n{private}", inline=False)
-        embed.add_field(name="Combat time", value=timing, inline=False)
-        embed.add_field(name="Shipment", value=shipment, inline=False)
-        embed.add_field(name="Transport and storage", value=loads, inline=False)
-        embed.add_field(name="Journey time", value=route, inline=False)
-        await send_report(interaction, embed, share_text=public)
+        await send_report(interaction, embed, view=view)
 
 
 async def setup(bot: commands.Bot):
