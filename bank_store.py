@@ -126,21 +126,41 @@ async def account(guild, actor, *, admin, page=1, **target):
             f"FROM {table('entries')} e JOIN {table('operations')} o ON o.guild_id=e.guild_id AND o.id=e.operation_id "
             "WHERE e.guild_id=? AND e.account_id=? ORDER BY e.id DESC LIMIT 4 OFFSET ?", (guild, row["id"], (page-1)*3))
         banners = await banner_store.summary(conn, guild, row["id"]) if row["kind"] in ("land", "treasury") else None
-        return row | dict(balance=balance, entries=entries[:3], has_more=len(entries)>3, banners=banners)
+        archived = False
+        if row["kind"] == "land" and target.get("account_id") is not None:
+            archived = not await conn.fetchone("SELECT id FROM lands WHERE guild_id=? AND id=?", (guild, row["subject_id"]))
+        return row | dict(balance=balance, entries=entries[:3], has_more=len(entries)>3, banners=banners, archived=archived)
 
 
-async def accounts(guild, *, admin, page=1):
+async def accounts_page(guild, *, admin, page=1):
     require_admin(admin)
     async with write(guild) as conn:
         # Every registered land is available even before its first transaction.
         await conn.execute(f"INSERT INTO {table('accounts')} (guild_id,kind,subject_id,label,created_at) "
                            "SELECT guild_id,'land',id,name,? FROM lands WHERE guild_id=? ON CONFLICT DO NOTHING", (now().isoformat(), guild))
         await _account(conn, guild, "treasury", 0, "Central treasury")
-        return await conn.fetchall(
+        rows = await conn.fetchall(
             f"SELECT a.*,COALESCE((SELECT SUM(e.delta) FROM {table('entries')} e WHERE e.guild_id=a.guild_id AND e.account_id=a.id),0) AS balance,"
             "CASE WHEN a.kind='land' AND NOT EXISTS (SELECT 1 FROM lands l WHERE l.guild_id=a.guild_id AND l.id=a.subject_id) "
-            f"THEN 1 ELSE 0 END AS archived FROM {table('accounts')} a WHERE a.guild_id=? ORDER BY a.id LIMIT 10 OFFSET ?",
+            f"THEN 1 ELSE 0 END AS archived FROM {table('accounts')} a WHERE a.guild_id=? ORDER BY a.id LIMIT 11 OFFSET ?",
             (guild, (page-1)*10))
+        return rows[:10], len(rows) > 10
+
+
+async def accounts(guild, *, admin, page=1):
+    rows, _ = await accounts_page(guild, admin=admin, page=page)
+    return rows
+
+
+async def settlement_page(guild, actor, *, admin, page=1):
+    sql = "SELECT l.id,l.name FROM lands l WHERE l.guild_id=?"
+    params = (guild,)
+    if not admin:
+        sql += " AND (l.owner_id=? OR EXISTS (SELECT 1 FROM officers o WHERE o.land_id=l.id AND o.user_id=?))"
+        params += (actor, actor)
+    async with db.DBConnection() as conn:
+        rows = await conn.fetchall(sql + " ORDER BY LOWER(l.name),l.id LIMIT 11 OFFSET ?", params + ((page-1)*10,))
+    return rows[:10], len(rows) > 10
 
 
 async def _replay(conn, guild, actor, request_id, action):
@@ -169,7 +189,7 @@ async def adjust(guild, actor, amount, reason, *, admin, request_id, withdraw=Fa
     reason = reason.strip()
     if not 1 <= len(reason) <= 250:
         raise ValueError("Record a reason of 1–250 characters.")
-    if not any(target.get(key) is not None for key in ("member", "land_name", "account_id")) and not target.get("treasury"):
+    if not any(target.get(key) is not None for key in ("member", "land_name", "land_id", "account_id")) and not target.get("treasury"):
         raise ValueError("Explicitly choose the account to deposit into or withdraw from.")
     action = "withdraw" if withdraw else "deposit"
     async with write(guild) as conn:

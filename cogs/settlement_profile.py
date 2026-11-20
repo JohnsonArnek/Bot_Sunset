@@ -9,7 +9,7 @@ import bank_store as bank
 import database as db
 import models
 import weekly_claims as weekly
-from cogs.bank import account_text
+from cogs.bank_screens import account_card
 from cogs.claims import submit_request
 from cogs.ledger import can_read_land, settlement_embed
 from cogs.queue_cog import queue_card
@@ -56,15 +56,6 @@ class PageView(discord.ui.View):
     @discord.ui.button(label="Next", row=1)
     async def next_page(self, interaction, button):
         await open_card(interaction, partial(self.render, page=self.page+1), replace=self.private)
-
-
-async def bank_card(interaction, *, land_id, page=1):
-    row = await bank.account(interaction.guild_id, interaction.user.id, land_id=land_id, page=page,
-                             admin=interaction.permissions.administrator)
-    embed = discord.Embed(title="Settlement bank", description=account_text(row, page, statement=True),
-                          colour=discord.Colour.gold())
-    view = PageView(partial(bank_card, land_id=land_id), page, row["has_more"], private=True)
-    return dict(embed=embed, view=view if view.children else None)
 
 
 async def delivery_card(interaction, *, land_id):
@@ -205,7 +196,7 @@ async def profile_card(interaction, *, land_id, directory_page=None, private=Fal
     if rotation:
         status.append("This settlement uses the daily rotation.")
     view.add_item(ProfileAction("View delivery", partial(delivery_card, land_id=land_id), primary=bool(used and not offers and not pending)))
-    view.add_item(ProfileAction("Settlement bank", partial(bank_card, land_id=land_id)))
+    view.add_item(ProfileAction("Settlement bank", partial(account_card, land_id=land_id)))
     embed.description = "\n".join(status)
     embed.add_field(name="Land", value=f"{land['chunks']:,} chunks · {member_count:,} members")
     embed.add_field(name="Banner prices", value=f"{models.price_tier_label(land['chunks'], full)} · reserve {models.reserve_price(full):,} ems")
