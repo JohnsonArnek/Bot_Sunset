@@ -333,6 +333,9 @@ async def init_db():
             await conn.execute(bank_schema(True))
             await conn.execute(banner_schema(True))
             await conn.execute(library_schema(True))
+            await conn.execute("ALTER TABLE claim_requests ADD COLUMN IF NOT EXISTS approved_at TEXT, "
+                               "ADD COLUMN IF NOT EXISTS offer_notified_at TEXT, "
+                               "ADD COLUMN IF NOT EXISTS original_blocks INTEGER")
             migrations = [
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS guild_id BIGINT DEFAULT 0",
                 "ALTER TABLE lands ADD COLUMN IF NOT EXISTS bonus_members INTEGER DEFAULT 0",
@@ -462,6 +465,13 @@ async def init_db():
             await db.executescript(bank_schema(False))
             await db.executescript(banner_schema(False))
             await db.executescript(library_schema(False))
+            async with db.execute("PRAGMA table_info(claim_requests)") as cursor:
+                claim_columns = {row[1] for row in await cursor.fetchall()}
+            for column in ("approved_at", "offer_notified_at"):
+                if column not in claim_columns:
+                    await db.execute(f"ALTER TABLE claim_requests ADD COLUMN {column} TEXT")
+            if "original_blocks" not in claim_columns:
+                await db.execute("ALTER TABLE claim_requests ADD COLUMN original_blocks INTEGER")
             async with db.execute("PRAGMA table_info(war_stock)") as cursor:
                 existing = {row[1] for row in await cursor.fetchall()}
             for column in ("iron", "arrows", "logs"):
@@ -714,7 +724,9 @@ async def is_officer(land_id: int, user_id: int) -> bool:
 
 async def create_claim_request(land_id: int, chunks_requested: int, purpose: str) -> int | None:
     now = datetime.now(timezone.utc).isoformat()
-    async with DBConnection() as conn:
+    async with DBConnection() as conn, conn.transaction():
+        if IS_POSTGRES:
+            await conn.fetchone("SELECT id FROM lands WHERE id=? FOR UPDATE", (land_id,))
         existing = await conn.fetchone(
             "SELECT id FROM claim_requests WHERE land_id = ? AND status = 'pending'",
             (land_id,),
@@ -794,7 +806,7 @@ async def get_expired_approved_requests(guild_id: int, days: int = 7) -> list[di
             "SELECT cr.*, l.name as land_name, l.chunks, l.owner_id "
             "FROM claim_requests cr "
             "JOIN lands l ON cr.land_id = l.id "
-            "WHERE l.guild_id = ? AND cr.status = 'approved' AND cr.requested_at < ? "
+            "WHERE l.guild_id = ? AND cr.status = 'approved' AND COALESCE(cr.approved_at, cr.requested_at) <= ? "
             "ORDER BY cr.requested_at ASC",
             (guild_id, cutoff),
         )

@@ -7,13 +7,16 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 import discord
 
 import database as db
 import bank_store as bank
+import weekly_claims as weekly
+from cogs.queue_cog import queue_card
+from cogs.weekly_offers import OfferAction, notify_offers, offer_card, review_request
 from cogs.bank import BankCog
 from cogs.claims import ClaimsCog
 from cogs.distribution import DistributionCog
@@ -29,6 +32,118 @@ def interaction(guild, user=10, admin=False, request_id=100):
 
 
 class BankContract:
+    async def test_weekly_offer_decline_reallocates_once_and_rolls_remaining_into_leftovers(self):
+        first = await self.land(name="First", owner=10)
+        second = await self.land(name="Second", owner=20)
+        third = await self.land(name="Third", owner=30)
+        # The oldest request outranks the other two. Four of seven blocks are available.
+        first_req = await self.approval(first, blocks=5, age=10, status="pending")
+        await self.approval(second, blocks=1, age=2, status="pending")
+        await self.approval(third, blocks=2, status="pending")
+        runs = await asyncio.gather(weekly.distribute(self.guild, AT), weekly.distribute(self.guild, AT))
+        self.assertEqual(sum(run is not None for run in runs), 1)
+        result = next(run for run in runs if run)
+        self.assertEqual((result["offered"], result["partial"], result["leftover"]), (4, 1, 0))
+        await db.set_config(self.guild, "distribution_day", "5")
+        self.assertIsNone(await weekly.distribute(self.guild, AT + timedelta(days=1)))
+        offers = await weekly.offers(self.guild, owner=10)
+        self.assertEqual([(r["chunks_requested"], r["approved_at"]) for r in offers], [(4, AT.isoformat())])
+        with self.assertRaises(ValueError):
+            await weekly.decline(self.guild, 20, first_req["id"])
+        results = await asyncio.gather(*(weekly.decline(self.guild, 10, first_req["id"]) for _ in range(2)),
+                                       return_exceptions=True)
+        self.assertIn((3, 1), results)
+        self.assertEqual(sum(isinstance(r, ValueError) for r in results), 1)
+        self.assertEqual([r["land_name"] for r in await weekly.offers(self.guild)], ["Second", "Third"])
+        reserve = await db.get_reserve(self.guild)
+        self.assertEqual((reserve["total_blocks"], reserve["leftover_blocks"]), (3, 1))
+        self.assertEqual((await self.state(first))["deliveries"], 0)
+
+    async def test_owner_offer_binds_land_quote_expiry_and_receipt(self):
+        await self.land()
+        target = await self.land(name="Second land")
+        request = await self.approval(target, blocks=2, status="pending")
+        await weekly.review(self.guild, request["id"], True)
+        args = dict(request_id=41, payment="bank", allocation_id=request["id"], quote=(2,7))
+        for guild, owner, error in [(self.guild+1,10,"owner"), (self.guild,11,"owner"), (self.guild,10,"Insufficient")]:
+            with self.assertRaisesRegex(ValueError, error):
+                await bank.buy_claim(guild, owner, **args)
+        await self.deposit(30, land_name="Second land")
+        with self.assertRaisesRegex(ValueError, "price changed"):
+            await bank.buy_claim(self.guild, 10, **{**args, "quote": (2, 16)})
+        with patch.object(bank, "now", return_value=AT+timedelta(days=7)):
+            with self.assertRaisesRegex(ValueError, "expired"):
+                await bank.buy_claim(self.guild, 10, **args)
+        with patch.object(bank, "now", return_value=AT+timedelta(days=1)):
+            with self.assertRaisesRegex(ValueError, "Monday"):
+                await bank.buy_claim(self.guild, 10, **args)
+        paid = await bank.buy_claim(self.guild, 10, **args)
+        self.assertEqual((paid["land_id"], paid["balance"]), (target["id"], 16))
+        self.assertTrue((await bank.buy_claim(self.guild, 10, **args))["duplicate"])
+        with self.assertRaises(ValueError):
+            await weekly.decline(self.guild, 10, request["id"])
+        self.assertEqual((await self.state(target))["deliveries"], 1)
+
+    async def test_buy_and_decline_compete_for_same_offer_and_honor_weekly_allowance(self):
+        used = await self.land(name="Already bought", owner=12)
+        await self.approval(used)
+        await bank.buy_claim(self.guild, 12, request_id=20)
+        await self.approval(used, status="pending", age=9)
+        land = await self.land()
+        request = await self.approval(land, status="pending")
+        await weekly.review(self.guild, request["id"], True)
+        waiting = await self.land(name="Next", owner=22)
+        await self.approval(waiting, status="pending")
+        results = await asyncio.gather(bank.buy_claim(self.guild, 10, request_id=21,
+            allocation_id=request["id"], quote=(1, 7)), weekly.decline(self.guild, 10, request["id"]),
+            return_exceptions=True)
+        self.assertEqual(sum(isinstance(result, ValueError) for result in results), 1)
+        if isinstance(results[0], dict):
+            self.assertEqual((results[0]["payment"], results[0]["total"]), ("manual", 7))
+            self.assertIsNone(await db.get_approved_request(waiting["id"]))
+            self.assertEqual((await self.state(land))["deliveries"], 1)
+        else:
+            self.assertEqual(results[1], (1, 0))
+            self.assertIsNotNone(await db.get_approved_request(waiting["id"]))
+            self.assertEqual((await self.state(land))["deliveries"], 0)
+        self.assertIsNotNone(await db.get_pending_request(used["id"]))
+
+    async def test_expiry_returns_allocated_stock_once_seven_days_after_approval(self):
+        land = await self.land()
+        request = await self.approval(land, blocks=2, age=20, status="pending")
+        await weekly.review(self.guild, request["id"], True)
+        async with bank.write(self.guild) as conn:
+            self.assertEqual(await weekly.expire(conn, self.guild, AT + timedelta(days=6)), [])
+            expired = await weekly.expire(conn, self.guild, AT + timedelta(days=7))
+            self.assertEqual([row["id"] for row in expired], [request["id"]])
+            self.assertEqual(await weekly.expire(conn, self.guild, AT + timedelta(days=8)), [])
+        self.assertEqual((await db.get_reserve(self.guild))["total_blocks"], 2)
+        self.assertEqual((await self.state(land))["deliveries"], 0)
+
+    async def test_rotation_bypass_empty_queue_recovery_and_persistent_offer_buttons(self):
+        await db.set_config(self.guild, "claim_mode", "rotation")
+        land = await self.land(chunks=0)
+        request = await db.create_claim_request(land["id"], 1, "builds")
+        self.assertIsNone(await db.create_claim_request(land["id"], 1, "vault"))
+        self.assertIsNone(await weekly.distribute(self.guild, AT))
+        self.assertIsNotNone(await db.get_pending_request(land["id"]))
+        await weekly.review(self.guild, request, True)
+        options = await queue_card(self.guild)
+        self.assertIn("My allocation", [button.label for button in options["view"].children])
+        rows = await weekly.offers(self.guild, owner=10)
+        view = offer_card(SimpleNamespace(id=self.guild, name="Guild"), rows[0])["view"]
+        self.assertTrue(view.is_persistent())
+        items = view.children
+        self.assertEqual([item.action for item in items], ["manual", "decline"])
+        item = items[0]
+        match = OfferAction.__discord_ui_compiled_template__.fullmatch(item.custom_id)
+        restored = await OfferAction.from_custom_id(None, item.item, match)
+        click = interaction(None, request_id=807)
+        click.edit_original_response = AsyncMock()
+        await restored.callback(click)
+        self.assertIn("Free allocation", click.edit_original_response.await_args.kwargs["content"])
+        self.assertEqual((await self.state(land))["deliveries"], 1)
+
     async def land(self, owner=10, chunks=3, name="Test Keep", guild=None):
         async with db.DBConnection() as conn:
             return await conn.execute_returning_one(
@@ -231,6 +346,40 @@ class BankContract:
 
 
 class BankSQLite(BankContract, unittest.IsolatedAsyncioTestCase):
+    async def test_staff_review_and_closed_dms_leave_the_offer_available_to_the_owner(self):
+        land = await self.land()
+        request = await db.create_claim_request(land["id"], 2, "vault")
+        guild = SimpleNamespace(id=self.guild, name="Guild", owner_id=90)
+        click = interaction(self.guild, user=911)
+        click.guild = guild
+        click.user.guild_permissions = discord.Permissions.none()
+        click.edit_original_response = AsyncMock()
+        user = SimpleNamespace(send=AsyncMock(side_effect=discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "DMs closed")))
+        bot = SimpleNamespace(get_user=Mock(return_value=user))
+        click.client = bot
+        await review_request(click, request, approve=True)
+        self.assertIsNotNone(await db.get_pending_request(land["id"]))
+        click.user.guild_permissions = discord.Permissions(administrator=True)
+        await review_request(click, request, approve=True)
+        user.send.assert_awaited_once()
+        self.assertIn("approved", click.edit_original_response.await_args.kwargs["content"])
+        await notify_offers(bot, guild)
+        user.send.assert_awaited_once()
+        card = await queue_card(self.guild)
+        owner = interaction(self.guild)
+        owner.guild = guild
+        await card["view"].mine.callback(owner)
+        kwargs = owner.followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual([item.action for item in kwargs["view"].children], ["bank", "manual", "decline"])
+        cash = kwargs["view"].children[1]
+        owner.edit_original_response = AsyncMock()
+        await cash.callback(owner)
+        receipt = owner.edit_original_response.await_args.kwargs["content"]
+        self.assertIn("Due in person · **14 ems**", receipt)
+        self.assertIn("**2** banners awaiting delivery", receipt)
+
     async def asyncSetUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

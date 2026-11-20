@@ -63,13 +63,13 @@ def queue_score(
     return score
 
 
-def days_in_queue(requested_at_iso: str) -> int:
+def days_in_queue(requested_at_iso: str, at: datetime | None = None) -> int:
     """
     Compute whole days elapsed since a request was submitted.
     Uses UTC to avoid timezone drift.
     """
     requested_at = datetime.fromisoformat(requested_at_iso).replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+    now = at or datetime.now(timezone.utc)
     delta = now - requested_at
     return max(0, delta.days)
 
