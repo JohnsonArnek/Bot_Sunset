@@ -22,6 +22,7 @@ from cogs.bank_screens import PublicBankButton, account_card, directory_card as 
 from cogs.claims import ClaimsCog
 from cogs.distribution import DistributionCog
 from cogs.land import LandCog
+from cogs.land_members import SavedRosterSelect, member_card
 from cogs.settlement_profile import directory_card, profile_card
 
 
@@ -35,6 +36,86 @@ def interaction(guild, user=10, admin=False, request_id=100):
 
 
 class BankContract:
+    async def test_saved_roster_removes_departed_officer_by_id_from_selected_land(self):
+        land = await self.land()
+        other = await self.land(owner=11, name="Other")
+        for land_id in (land["id"], other["id"]):
+            await db.add_member(land_id, 42)
+            await db.add_officer(land_id, 42)
+        owner = interaction(self.guild)
+        owner.user.guild_permissions = owner.permissions
+        missing = discord.NotFound(Mock(status=404, reason="Not Found"), {"code": 10007, "message": "Unknown Member"})
+        owner.guild = SimpleNamespace(get_member=Mock(return_value=None), fetch_member=AsyncMock(side_effect=missing),
+                                      owner_id=900)
+        rotation = SimpleNamespace(refresh_allowed_reactors=AsyncMock())
+        owner.client = SimpleNamespace(get_user=Mock(return_value=None), fetch_user=AsyncMock(side_effect=missing),
+                                       get_cog=Mock(return_value=rotation))
+        owner.edit_original_response = AsyncMock()
+        profile = await profile_card(owner, land_id=land["id"])
+        await next(b for b in profile["view"].children if b.label == "Member management").callback(owner)
+        view = owner.followup.send.await_args.kwargs["view"]
+        await view.saved.callback(owner)
+        def screen():
+            return owner.edit_original_response.await_args.kwargs
+        roster = screen()["view"]
+        select = next(c for c in roster.children if isinstance(c, SavedRosterSelect))
+        self.assertEqual([(o.label, o.value) for o in select.options], [("Discord ID 42", "42")])
+        self.assertTrue(roster.remove.disabled)
+        select._values = ["42"]
+        await select.callback(owner)
+        review = screen()["view"]
+        self.assertIn("No longer in this Discord server", screen()["embed"].description)
+        self.assertIn("ends their appointment", screen()["embed"].description)
+        self.assertTrue(await db.is_officer(land["id"], 42))
+        self.assertNotIn(review.promote, review.children)
+        self.assertFalse(review.remove.disabled)
+        await review.remove.callback(owner)
+        self.assertIn("Removed", screen()["content"])
+        self.assertIn("Discord ID `42`", screen()["content"])
+        self.assertEqual(await db.get_members(land["id"]), [])
+        self.assertFalse(await db.is_officer(land["id"], 42))
+        self.assertTrue(await db.is_officer(other["id"], 42))
+        self.assertTrue(screen()["view"].remove.disabled)
+        rotation.refresh_allowed_reactors.assert_awaited_once_with(self.guild)
+        owner.client.fetch_user.assert_awaited_once_with(42)
+
+    async def test_saved_roster_pages_legacy_records_and_rechecks_access(self):
+        land = await self.land()
+        for uid in range(21, 31):
+            await db.add_member(land["id"], uid)
+        await db.add_member(land["id"], 19)
+        await db.add_officer(land["id"], 55)  # Officer-only registration in an older roster.
+        await db.add_member(land["id"], 10)  # The settlement owner is protected even if duplicated.
+        actor = interaction(self.guild)
+        actor.user.guild_permissions = actor.permissions
+        present = SimpleNamespace(display_name="Current member")
+        actor.guild = SimpleNamespace(owner_id=900, get_member=lambda uid: present if uid == 19 else None,
+                                      fetch_member=AsyncMock(side_effect=TimeoutError()))
+        actor.client = SimpleNamespace(get_user=Mock(return_value=None), get_cog=Mock(return_value=None),
+                                       fetch_user=AsyncMock(return_value=SimpleNamespace(display_name="Alex")))
+        actor.edit_original_response = AsyncMock()
+        roster = (await member_card(actor, land_id=land["id"], back=AsyncMock(), saved_page=1))["view"]
+        def picker(v):
+            return next(c for c in v.children if isinstance(c, SavedRosterSelect))
+        self.assertEqual([o.value for o in picker(roster).options], [str(i) for i in range(21, 31)])
+        await roster.next_page.callback(actor)
+        page = actor.edit_original_response.await_args.kwargs["view"]
+        self.assertEqual([(o.label, o.value) for o in picker(page).options], [("Alex", "55"), ("Current member", "19")])
+        picker(page)._values = ["55"]
+        await picker(page).callback(actor)
+        selected = actor.edit_original_response.await_args.kwargs
+        self.assertIn("membership unverified", selected["embed"].description)
+        self.assertFalse(selected["view"].remove.disabled)
+        await db.update_land_owner(land["id"], 12)
+        await selected["view"].remove.callback(actor)
+        self.assertTrue(await db.is_officer(land["id"], 55))
+        self.assertIsNone(actor.edit_original_response.await_args.kwargs["view"])
+        actor.user.id = 12
+        page = (await member_card(actor, land_id=land["id"], back=AsyncMock(), user_id=55, saved_page=2))["view"]
+        await page.remove.callback(actor)
+        self.assertFalse(await db.is_officer(land["id"], 55))
+        self.assertEqual(await db.get_member_count(land["id"]), 12)
+
     async def test_profile_member_management_add_promote_remove_and_back(self):
         land = await self.land(name="Coppercross")
         owner = interaction(self.guild)
