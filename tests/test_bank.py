@@ -18,6 +18,7 @@ import weekly_claims as weekly
 from cogs.queue_cog import queue_card
 from cogs.weekly_offers import OfferAction, notify_offers, offer_card, review_request
 from cogs.bank import BankCog
+from cogs.bank_screens import PublicBankButton, account_card, directory_card as bank_directory, public_links
 from cogs.claims import ClaimsCog
 from cogs.distribution import DistributionCog
 from cogs.land import LandCog
@@ -34,6 +35,96 @@ def interaction(guild, user=10, admin=False, request_id=100):
 
 
 class BankContract:
+    async def test_player_picker_first_deposit_receipt_replay_and_private_statement(self):
+        admin = interaction(self.guild, user=900, admin=True, request_id=982)
+        admin.edit_original_response = AsyncMock()
+        cog = BankCog()
+        await cog.accounts.callback(cog, admin)
+        directory = admin.followup.send.await_args.kwargs
+        self.assertTrue(directory["ephemeral"])
+        player = SimpleNamespace(id=42, display_name="Alex", guild=SimpleNamespace(id=self.guild), bot=False)
+        picker = directory["view"].player
+        # Discord resolves user selections from interaction data.
+        with patch.object(type(picker), "values", new_callable=unittest.mock.PropertyMock, return_value=[player]):
+            await picker.callback(admin)
+        screen = admin.edit_original_response.await_args.kwargs
+        self.assertEqual(screen["embed"].title, "Personal bank account")
+        self.assertIn("0 ems", screen["embed"].description)
+        await screen["view"].deposit.callback(admin)
+        form = admin.response.send_modal.await_args.args[0]
+        self.assertIn("Player", form.title)
+        self.assertIn("Alex", form.title)
+        form.amount._value, form.reason._value = "64", "Received in Coppercross"
+        await form.on_submit(admin)
+        saved = admin.edit_original_response.await_args.kwargs
+        self.assertIn("+64 ems", saved["content"])
+        self.assertIn("Received in Coppercross", saved["embed"].description)
+        admin.id = 983
+        await form.on_submit(admin)
+        self.assertEqual(await self.balance(member=42), 64)
+        self.assertEqual(await self.balance(member=900), 0)
+        await saved["view"].back.callback(admin)
+        self.assertEqual(admin.edit_original_response.await_args.kwargs["embed"].title, "Bank administration")
+
+        reader = interaction(self.guild, user=42)
+        public = public_links()
+        self.assertTrue(public.is_persistent())
+        item = public.children[0]
+        match = PublicBankButton.__discord_ui_compiled_template__.fullmatch(item.custom_id)
+        restored = await PublicBankButton.from_custom_id(None, item.item, match)
+        await restored.callback(reader)
+        reader.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        card = reader.followup.send.await_args.kwargs
+        self.assertTrue(card["ephemeral"])
+        self.assertIn("64 ems", card["embed"].description)
+        self.assertNotIn("Deposit", [b.label for b in card["view"].children])
+        reader.edit_original_response = AsyncMock()
+        await card["view"].toggle.callback(reader)
+        self.assertIn("Received in Coppercross", reader.edit_original_response.await_args.kwargs["embed"].description)
+
+    async def test_settlement_picker_authority_and_forms_stay_bound_to_original_account(self):
+        land = await self.land(owner=11, name="Coppercross")
+        await self.land(owner=22, name="Other")
+        await db.add_officer(land["id"], 42)
+        officer = interaction(self.guild, user=42)
+        await public_links().children[1].callback(officer)
+        choices = officer.followup.send.await_args.kwargs["view"]
+        select = next(c for c in choices.children if isinstance(c, discord.ui.Select))
+        self.assertEqual([o.label for o in select.options], ["Coppercross"])
+        select._values = [select.options[0].value]
+        officer.edit_original_response = AsyncMock()
+        await select.callback(officer)
+        self.assertNotIn("Withdraw", [b.label for b in officer.edit_original_response.await_args.kwargs["view"].children])
+
+        admin = interaction(self.guild, user=900, admin=True, request_id=71)
+        admin.edit_original_response = AsyncMock()
+        card = await profile_card(admin, land_id=land["id"])
+        await next(b for b in card["view"].children if b.label=="Settlement bank").callback(admin)
+        view = admin.followup.send.await_args.kwargs["view"]
+        await view.withdraw.callback(admin)
+        form = admin.response.send_modal.await_args.args[0]
+        self.assertIn("Coppercross", form.title)
+        form.amount._value, form.reason._value = "7", "Physical withdrawal"
+        await self.deposit(20, land_name="Coppercross")
+        admin.permissions = discord.Permissions.none()
+        await form.on_submit(admin)
+        self.assertEqual(await self.balance(land_name="Coppercross"),20)
+        wrong = interaction(self.guild+1, user=900, admin=True)
+        await form.on_submit(wrong)
+        wrong.response.send_message.assert_awaited_once()
+        admin.permissions = discord.Permissions(administrator=True)
+        await form.on_submit(admin)
+        self.assertEqual(await self.balance(land_name="Coppercross"),13)
+        self.assertEqual(await self.balance(member=11),0)
+        admin.id = 72
+        await admin.edit_original_response.await_args.kwargs["view"].deposit.callback(admin)
+        stale = admin.response.send_modal.await_args.args[0]
+        stale.amount._value, stale.reason._value = "2", "Deposit"
+        await db.delete_land(land["id"])
+        await self.land(owner=11, name="Coppercross")
+        await stale.on_submit(admin)
+        self.assertEqual(await self.balance(land_name="Coppercross"),0)
+
     async def test_settlement_profile_request_offer_purchase_delivery(self):
         land_id = await db.create_land(self.guild, "Coppercross", 10, 4)
         owner = interaction(self.guild)
@@ -438,6 +529,39 @@ class BankContract:
 
 
 class BankSQLite(BankContract, unittest.IsolatedAsyncioTestCase):
+    async def test_bank_screen_directory_paging_and_receipt_after_display_failure(self):
+        admin = interaction(self.guild, user=900, admin=True, request_id=61)
+        admin.edit_original_response = AsyncMock()
+        for n in range(11):
+            await self.land(owner=n+100, name=f"Land {n:02d}")
+        directory = await bank_directory(admin)
+        await directory["view"].settlements.callback(admin)
+        first = admin.edit_original_response.await_args.kwargs["view"]
+        await first.next_page.callback(admin)
+        second = admin.edit_original_response.await_args.kwargs["view"]
+        select = next(c for c in second.children if isinstance(c, discord.ui.Select))
+        self.assertEqual([o.label for o in select.options], ["Land 10"])
+        select._values = [select.options[0].value]
+        await select.callback(admin)
+        screen = admin.edit_original_response.await_args.kwargs["view"]
+        await screen.back.callback(admin)
+        self.assertIn("Page 2", admin.edit_original_response.await_args.kwargs["embed"].footer.text)
+
+        card = await account_card(admin, member=55)
+        await card["view"].deposit.callback(admin)
+        modal = admin.response.send_modal.await_args.args[0]
+        modal.amount._value, modal.reason._value = "6", "First deposit"
+        admin.edit_original_response.side_effect = TimeoutError()
+        with self.assertLogs("cogs.bank_screens", level="ERROR"):
+            await modal.on_submit(admin)
+        self.assertIn("+6 ems", admin.followup.send.await_args.args[0])
+        self.assertTrue(admin.followup.send.await_args.kwargs["ephemeral"])
+        admin.id += 1
+        admin.edit_original_response.side_effect = None
+        await modal.on_submit(admin)
+        self.assertIn("Already recorded", admin.edit_original_response.await_args.kwargs["content"])
+        self.assertEqual(await self.balance(member=55), 6)
+
     async def test_profile_request_modal_rechecks_member_quantity_and_claim_mode(self):
         land = await self.land()
         await db.add_member(land["id"], 44)

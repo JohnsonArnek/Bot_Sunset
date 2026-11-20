@@ -7,18 +7,14 @@ from discord.ext import commands
 import bank_store as store
 import banner_account
 from cogs.war_share import message_payload
+from cogs.bank_screens import Directory, PublicBankButton, account_card, adjustment_receipt, directory_card, public_links
+from cogs.report_view import NO_MENTIONS
 
 
 Amount = app_commands.Range[int, 1, store.MAX_AMOUNT]
 AccountID = app_commands.Range[int, 1, 2**53 - 1]
 Page = app_commands.Range[int, 1, 1_000_000]
 Reason = app_commands.Range[str, 1, 250]
-
-
-def account_name(row):
-    if row["kind"] == "member":
-        return f"<@{row['subject_id']}>"
-    return discord.utils.escape_markdown(row["label"])[:100]
 
 
 async def reply(interaction, text):
@@ -31,33 +27,18 @@ def target(member, land_name, account_id):
     return dict(member=member.id if member else None, land_name=land_name, account_id=account_id)
 
 
-def account_text(row, page=1, *, statement=False):
-    lines = [f"**{account_name(row)} · account #{row['id']}**", f"Balance: **{row['balance']:,} ems**"]
-    if row["banners"]:
-        b = row["banners"]
-        share = b["land_share"] if row["kind"] == "land" else b["central_share"]
-        needed = b["land_share"]-b["prepaid"] if row["kind"] == "land" else b["central_share"]+b["prepaid"]
-        lines.append(f"**Creation funding for sold banners** · {b['pending']:,} awaiting settlement\n"
-                     f"This budget's share: **{share:,} ems** · bank funding still needed: **{needed:,} ems**\n"
-                     f"Land contributions already transferred to treasury: {b['prepaid']:,} ems.\n"
-                     "Funds are not reserved. Physical land payment can be confirmed by an administrator at creation.")
-        if b["premium_due"]:
-            lines.append(f"Manual reserve premiums due to the treasury: **{b['premium_due']:,} ems**.")
-    if statement:
-        lines.append(f"**Statement · page {page} · 3 entries per page**")
-        for e in row["entries"]:
-            lines.append(f"**#{e['operation_id']} · {e['delta']:+,} ems** · {e['action']} · {e['created_at'][:10]} UTC\n"
-                         f"By <@{e['actor_id']}> · balance after entry: {e['balance_after']:,} ems\n"
-                         f"{discord.utils.escape_markdown(e['reason'])}")
-        if not row["entries"]:
-            lines.append("No entries on this page.")
-    else:
-        lines.append("Balances use whole emeralds. An administrator records deposits and withdrawals.")
-    return "\n\n".join(lines)
-
-
 @app_commands.guild_only()
 class BankCog(commands.GroupCog, name="bank", group_description="Emerald accounts, statements and administrator banking"):
+    def __init__(self, bot=None):
+        self.bot = bot
+        super().__init__()
+
+    async def cog_load(self):
+        self.bot.add_dynamic_items(PublicBankButton)
+
+    async def cog_unload(self):
+        self.bot.remove_dynamic_items(PublicBankButton)
+
     async def interaction_check(self, interaction):
         if interaction.guild_id is None:
             raise app_commands.NoPrivateMessage()
@@ -103,15 +84,15 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
                         value=f"**{payments['due_blocks']:,} banners · {payments['due_ems']:,} ems to collect** "
                         "across all tracked receipts.", inline=False)
         embed.set_footer(text="Sales are booked at purchase. Manual amounts are sale prices. Unsold banners are valued at the current creation cost.")
-        await interaction.followup.send(embed=embed, ephemeral=False, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.followup.send(embed=embed, view=public_links(), ephemeral=False, allowed_mentions=NO_MENTIONS)
 
     async def read(self, interaction, member, land_name, account_id, page=1, statement=False, treasury=False):
         try:
-            row = await store.account(interaction.guild_id, interaction.user.id, admin=interaction.permissions.administrator,
-                                      page=page, treasury=treasury, **target(member, land_name, account_id))
+            card = await account_card(interaction, page=page, statement=statement, treasury=treasury,
+                                      member_name=getattr(member, "display_name", None), **target(member, land_name, account_id))
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        await reply(interaction, account_text(row, page, statement=statement))
+        await interaction.followup.send(**card, ephemeral=True, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(description="Read your balance, your land's balance, or an account as administrator")
     @app_commands.describe(member="Yourself, or another member for administrators", land_name="Your settlement; administrators may select any",
@@ -132,10 +113,7 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
                                      **target(member, land_name, account_id))
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        await reply(interaction, f"**{'Already recorded' if row['duplicate'] else 'Recorded'} · transaction #{row['operation_id']}**\n"
-                    f"{account_name(row)} · account #{row['account_id']}\n"
-                    f"Change: **{row['delta']:+,} ems** · balance after transaction: **{row['balance']:,} ems**\n"
-                    f"Reason: {discord.utils.escape_markdown(row['reason'])}")
+        await reply(interaction, adjustment_receipt(row))
 
     @app_commands.command(description="[Admin] Credit a member or land after approving a deposit")
     async def deposit(self, interaction: discord.Interaction, amount: Amount, reason: Reason,
@@ -150,15 +128,10 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
     @app_commands.command(description="[Admin] List settlement accounts, opened personal accounts and the treasury")
     async def accounts(self, interaction: discord.Interaction, page: Page = 1):
         try:
-            rows = await store.accounts(interaction.guild_id, admin=interaction.permissions.administrator, page=page)
+            card = await directory_card(interaction, directory=Directory(page=page))
         except ValueError as exc:
             return await reply(interaction, str(exc))
-        lines = [f"**Bank accounts · page {page}**"]
-        lines.extend(f"#{r['id']} · {account_name(r)} · **{r['balance']:,} ems**" + (" · archived land" if r["archived"] else "") for r in rows)
-        if not rows:
-            lines.append("No accounts on this page.")
-        lines.append("Personal accounts start at zero and open on first use. Use account_id to inspect an archived account.")
-        await reply(interaction, "\n".join(lines))
+        await interaction.followup.send(**card, ephemeral=True, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(description="[Admin] Read the central treasury balance and its latest entries")
     async def treasury(self, interaction: discord.Interaction, page: Page = 1):
@@ -166,4 +139,4 @@ class BankCog(commands.GroupCog, name="bank", group_description="Emerald account
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(BankCog())
+    await bot.add_cog(BankCog(bot))
