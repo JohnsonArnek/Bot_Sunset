@@ -636,6 +636,51 @@ async def delete_land(land_id: int):
 
 # ── Member helpers ────────────────────────────────────────────────────
 
+async def change_land_roster(guild_id, land_id, actor_id, *, staff, user_id, action):
+    """Apply a roster decision and its officer change in one transaction."""
+    if action not in ("add", "remove", "promote"):
+        raise ValueError("Unknown roster action.")
+    async with DBConnection() as conn, conn.transaction():
+        if IS_POSTGRES:
+            # Competing settlements can both try to register the same Discord user.
+            await conn.execute("SELECT pg_advisory_xact_lock(?::bigint)", (-user_id,))
+        lock = " FOR UPDATE" if IS_POSTGRES else ""
+        land = await conn.fetchone("SELECT * FROM lands WHERE guild_id=? AND id=?" + lock, (guild_id, land_id))
+        if not land:
+            raise ValueError("This settlement is no longer registered here.")
+        if actor_id != land["owner_id"] and not staff:
+            raise ValueError("Only the settlement owner or staff can manage this roster.")
+        if user_id == land["owner_id"]:
+            raise ValueError("This person is the settlement owner.")
+
+        target = (land_id, user_id)
+        member = await conn.fetchone("SELECT 1 FROM members WHERE land_id=? AND user_id=?", target)
+        officer = await conn.fetchone("SELECT 1 FROM officers WHERE land_id=? AND user_id=?", target)
+        if action == "remove":
+            if not member:
+                raise ValueError("This person is not a member of this settlement.")
+            await conn.execute("DELETE FROM officers WHERE land_id=? AND user_id=?", target)
+            await conn.execute("DELETE FROM members WHERE land_id=? AND user_id=?", target)
+        else:
+            if action == "add" and member:
+                raise ValueError("This person is already a member of this settlement.")
+            if action == "promote" and officer:
+                raise ValueError("This person is already an officer here.")
+            if not member and action == "add":
+                other = await conn.fetchone(
+                    "SELECT name FROM lands l WHERE guild_id=? AND id<>? AND (owner_id=? OR EXISTS "
+                    "(SELECT 1 FROM members m WHERE m.land_id=l.id AND m.user_id=?)) LIMIT 1",
+                    (guild_id, land_id, user_id, user_id))
+                if other:
+                    raise ValueError(f"This person already belongs to {other['name']} on this server.")
+            if not member:
+                await conn.execute("INSERT INTO members (land_id,user_id) VALUES (?,?)", target)
+            if action == "promote":
+                await conn.execute("INSERT INTO officers (land_id,user_id) VALUES (?,?)", target)
+        count = await conn.fetchone("SELECT COUNT(*) AS n FROM members WHERE land_id=?", (land_id,))
+        return land, count["n"] + (land["bonus_members"] or 0), bool(officer)
+
+
 async def add_member(land_id: int, user_id: int):
     async with DBConnection() as conn:
         if IS_POSTGRES:

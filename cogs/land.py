@@ -8,20 +8,9 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
+from cogs.land_members import apply_change, is_staff as _is_staff
 from cogs.report_view import NO_MENTIONS
 from cogs.settlement_profile import directory_card, profile_card
-
-
-async def _is_staff(interaction: discord.Interaction) -> bool:
-    if not interaction.guild:
-        return False
-    if interaction.user.guild_permissions.administrator:
-        return True
-    staff_role_id = await db.get_staff_role_id(interaction.guild_id)
-    if staff_role_id == 0:
-        owner_id = interaction.guild.owner_id or (interaction.guild.owner.id if interaction.guild.owner else None)
-        return interaction.user.id == owner_id
-    return any(r.id == staff_role_id for r in getattr(interaction.user, "roles", []))
 
 
 class LandCog(commands.GroupCog, name="land"):
@@ -86,103 +75,37 @@ class LandCog(commands.GroupCog, name="land"):
     @app_commands.describe(user="The user to add", land_name="Target land name (Staff only; default: your land)")
     @app_commands.guild_only()
     async def member_add(self, interaction: discord.Interaction, user: discord.Member, land_name: str = None):
-        await interaction.response.defer()
-
-        if land_name:
-            if not await _is_staff(interaction):
-                return await interaction.followup.send("🔒 Only staff can specify a land_name for other lands.", ephemeral=True)
-            land = await db.get_land_by_name(interaction.guild_id, land_name)
-            if not land:
-                return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
-        else:
-            land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
-            if not land:
-                return await interaction.followup.send("❌ You must be a land owner on this server (or specify land_name if Staff).", ephemeral=True)
-
-        if user.id == land["owner_id"]:
-            return await interaction.followup.send(f"❌ {user.mention} is already the owner of **{land['name']}**.", ephemeral=True)
-
-        existing = await db.get_land_for_user(interaction.guild_id, user.id)
-        if existing:
-            return await interaction.followup.send(
-                f"❌ {user.mention} already belongs to **{existing['name']}** on this server.", ephemeral=True)
-
-        await db.add_member(land["id"], user.id)
-        count = await db.get_member_count(land["id"])
-        embed = discord.Embed(title="👥 Member Added", colour=discord.Colour.green(),
-                              description=f"{user.mention} joined **{land['name']}**.")
-        embed.add_field(name="Total Members", value=str(count))
-        embed.set_footer(text="+2 queue score per member")
-        await interaction.followup.send(embed=embed)
+        await self.change_roster(interaction, user, land_name, "add")
 
     @app_commands.command(name="member_remove", description="Remove a member from a land (Staff can specify land_name)")
     @app_commands.describe(user="The user to remove", land_name="Target land name (Staff only; default: your land)")
     @app_commands.guild_only()
     async def member_remove(self, interaction: discord.Interaction, user: discord.Member, land_name: str = None):
-        await interaction.response.defer()
-
-        if land_name:
-            if not await _is_staff(interaction):
-                return await interaction.followup.send("🔒 Only staff can specify a land_name for other lands.", ephemeral=True)
-            land = await db.get_land_by_name(interaction.guild_id, land_name)
-            if not land:
-                return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
-        else:
-            land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
-            if not land:
-                return await interaction.followup.send("❌ You must be a land owner on this server (or specify land_name if Staff).", ephemeral=True)
-
-        removed = await db.remove_member(land["id"], user.id)
-        if not removed:
-            return await interaction.followup.send(
-                f"❌ {user.mention} is not in **{land['name']}**.", ephemeral=True)
-        # Also remove officer designation if they were an officer
-        await db.remove_officer(land["id"], user.id)
-        count = await db.get_member_count(land["id"])
-        embed = discord.Embed(title="👥 Member Removed", colour=discord.Colour.orange(),
-                              description=f"{user.mention} removed from **{land['name']}**.")
-        embed.add_field(name="Members Remaining", value=str(count))
-        await interaction.followup.send(embed=embed)
+        await self.change_roster(interaction, user, land_name, "remove")
 
     @app_commands.command(name="officer_add", description="Designate an officer for a land (Staff can specify land_name)")
     @app_commands.describe(user="The user to appoint as officer", land_name="Target land name (Staff only; default: your land)")
     @app_commands.guild_only()
     async def officer_add(self, interaction: discord.Interaction, user: discord.Member, land_name: str = None):
-        await interaction.response.defer()
+        await self.change_roster(interaction, user, land_name, "promote")
 
+    async def change_roster(self, interaction, user, land_name, action):
+        await interaction.response.defer()
         if land_name:
             if not await _is_staff(interaction):
                 return await interaction.followup.send("🔒 Only staff can specify a land_name for other lands.", ephemeral=True)
             land = await db.get_land_by_name(interaction.guild_id, land_name)
             if not land:
-                return await interaction.followup.send(f"❌ Land **{land_name}** not found on this server.", ephemeral=True)
+                return await interaction.followup.send("Land not found on this server.", ephemeral=True)
         else:
             land = await db.get_land_by_owner(interaction.guild_id, interaction.user.id)
             if not land:
-                return await interaction.followup.send("❌ You must be a land owner on this server (or specify land_name if Staff).", ephemeral=True)
-
-        if user.id == land["owner_id"]:
-            return await interaction.followup.send(f"❌ {user.mention} is already the owner of **{land['name']}**.", ephemeral=True)
-
-        if await db.is_officer(land["id"], user.id):
-            return await interaction.followup.send(f"❌ {user.mention} is already an officer of **{land['name']}**.", ephemeral=True)
-
-        # Ensure user is also added as a member of this land
-        await db.add_member(land["id"], user.id)
-        await db.add_officer(land["id"], user.id)
-
-        embed = discord.Embed(
-            title="🛡️ Officer Appointed",
-            description=f"{user.mention} is now an officer of **{land['name']}**!\nThey will be pinged alongside the owner for turn offers and can confirm claims.",
-            colour=discord.Colour.blue(),
-        )
-        embed.set_footer(text=f"Appointed by {interaction.user.display_name}")
-        await interaction.followup.send(embed=embed)
-
-        # Refresh live rotation reactors so the new officer can react immediately
-        rotation_cog = self.bot.get_cog("rotation")
-        if rotation_cog:
-            await rotation_cog.refresh_allowed_reactors(interaction.guild_id)
+                return await interaction.followup.send("You must own a settlement or specify land_name as staff.", ephemeral=True)
+        try:
+            receipt = await apply_change(interaction, land["id"], user.id, action)
+        except ValueError as exc:
+            return await interaction.followup.send(str(exc), ephemeral=True, allowed_mentions=NO_MENTIONS)
+        await interaction.followup.send(embed=receipt, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="officer_remove", description="Remove an officer from a land (Staff can specify land_name)")
     @app_commands.describe(user="The officer to remove", land_name="Target land name (Staff only; default: your land)")

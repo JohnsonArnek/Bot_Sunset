@@ -11,6 +11,7 @@ import models
 import weekly_claims as weekly
 from cogs.bank_screens import account_card
 from cogs.claims import submit_request
+from cogs.land_members import member_card
 from cogs.ledger import can_read_land, settlement_embed
 from cogs.queue_cog import queue_card
 from cogs.report_view import NO_MENTIONS, clip
@@ -208,6 +209,8 @@ async def profile_card(interaction, *, land_id, directory_page=None, private=Fal
     if max(len(officers), len(members)) > 18:
         view.add_item(ProfileAction("Full roster", partial(roster_card, land_id=land_id), row=1))
     refresh = partial(profile_card, land_id=land_id, directory_page=directory_page, private=True)
+    view.add_item(ProfileAction("Member management", partial(member_card, land_id=land_id, back=refresh),
+                                row=1, replace=private))
     view.add_item(ProfileAction("Refresh", refresh, row=1, replace=private))
     if directory_page is not None:
         view.add_item(ProfileAction("Back to list", partial(directory_card, page=directory_page, private=True), row=1, replace=private))
