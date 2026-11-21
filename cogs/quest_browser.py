@@ -1,17 +1,18 @@
 """A private, reader-bound quest board. Navigation never grants quest rewards."""
 
 import asyncio
+from functools import partial
 import logging
 
 import discord
 from discord import app_commands
 
 import acclimation_store as store
+from cogs.acclimation_display import safe
+from cogs.quest_actions import QuestScreen, TEMPORARY, UNAVAILABLE, action_card, can_manage, deed_card
 
 
 log = logging.getLogger("claims-bot")
-TEMPORARY = "The quest board could not be loaded. Please try /quest list again shortly."
-UNAVAILABLE = "That quest is unavailable on this server. Use /quest list to browse current quests."
 
 
 def label(value, maximum=100):
@@ -19,10 +20,6 @@ def label(value, maximum=100):
     while len(value.encode("utf-16-le"))//2 > maximum:
         value = value[:-1]
     return value
-
-
-def safe(value):
-    return discord.utils.escape_markdown(value)
 
 
 async def choices(interaction, current):
@@ -58,61 +55,49 @@ class FilterSelect(discord.ui.Select):
         await self.view.navigate(interaction,unrewarded=self.values[0]=="unrewarded",page=1,quest_id=None)
 
 
-class QuestView(discord.ui.View):
-    def __init__(self, interaction, *, page=1, pages=1, query="", unrewarded=False, quest_id=None, rows=()):
-        super().__init__(timeout=600)
-        self.owner,self.guild,self.channel = interaction.user.id,interaction.guild_id,interaction.channel_id
-        self.source = interaction
+class QuestView(QuestScreen):
+    def __init__(self, interaction, *, page=1, pages=1, query="", unrewarded=False, quest_id=None, rows=(),
+                 manager=False, has_deed=False):
+        super().__init__(interaction)
         self.page,self.query,self.unrewarded,self.quest_id = page,query,unrewarded,quest_id
-        self.busy = False
+        if not manager:
+            self.remove_item(self.complete)
+            self.remove_item(self.close)
+        if not has_deed:
+            self.remove_item(self.deed)
+        elif not manager:
+            self.deed.style = discord.ButtonStyle.primary
         self.previous.disabled = quest_id is not None or page <= 1
         self.next_page.disabled = quest_id is not None or page >= pages
         self.back.disabled = quest_id is None
+        if quest_id is not None:
+            self.remove_item(self.previous)
+            self.remove_item(self.next_page)
         if rows:
             self.add_item(QuestSelect(rows))
         self.add_item(FilterSelect(unrewarded))
 
-    async def interaction_check(self, interaction):
-        if (interaction.user.id != self.owner or interaction.guild_id != self.guild or interaction.channel_id != self.channel
-                or self.is_finished() or self.busy):
-            await interaction.response.send_message("Use your latest quest board, or open your own with /quest list.",
-                                                    ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
-            return False
-        return True
+    def destination(self, **target):
+        state = dict(page=self.page, query=self.query, unrewarded=self.unrewarded, quest_id=self.quest_id) | target
+        return partial(render, **state)
 
     async def navigate(self, interaction, **target):
-        if not await self.interaction_check(interaction):
-            return
-        self.busy = True  # Before the first network await: stale clicks cannot overwrite a newer panel.
-        next_view = None
-        try:
-            await interaction.response.defer()
-            state = dict(page=self.page,query=self.query,unrewarded=self.unrewarded,quest_id=self.quest_id) | target
-            embed,next_view = await render(interaction,**state)
-            await interaction.edit_original_response(content=None,embed=embed,view=next_view,
-                                                     allowed_mentions=discord.AllowedMentions.none())
-        except Exception as exc:
-            if next_view:
-                next_view.stop()
-            message = UNAVAILABLE if isinstance(exc,LookupError) else TEMPORARY
-            if not isinstance(exc,LookupError):
-                log.warning("Quest navigation unavailable (%s)",type(exc).__name__)
-            try:
-                await interaction.edit_original_response(content=message,embed=None,view=None,
-                                                         allowed_mentions=discord.AllowedMentions.none())
-            except (discord.HTTPException,OSError,TimeoutError):
-                log.warning("Quest navigation error could not be displayed")
-        finally:
-            self.stop()
+        await self.replace(interaction, self.destination(**target))
 
-    async def on_timeout(self):
-        self.stop()
-        for item in self.children:
-            item.disabled = True
-        try:
-            await self.source.edit_original_response(view=self)
-        except (discord.HTTPException,OSError,TimeoutError):
-            log.info("Expired quest board could not be updated")
+    async def open_action(self, interaction, action):
+        await self.replace(interaction, partial(action_card, quest_id=self.quest_id, back=self.destination(), action=action))
+
+    @discord.ui.button(label="Record completion", style=discord.ButtonStyle.primary, row=0)
+    async def complete(self, interaction, button):
+        await self.open_action(interaction, "complete")
+
+    @discord.ui.button(label="Close quest", row=0)
+    async def close(self, interaction, button):
+        await self.open_action(interaction, "close")
+
+    @discord.ui.button(label="View my deed", row=0)
+    async def deed(self, interaction, button):
+        await self.replace(interaction, partial(deed_card, quest_id=self.quest_id, back=self.destination()))
 
     @discord.ui.button(label="Previous",row=2)
     async def previous(self, interaction, button):
@@ -153,7 +138,9 @@ async def render(interaction, *, page=1, query="", unrewarded=False, quest_id=No
         embed.add_field(name="Your progress",value=personal,inline=False)
         embed.add_field(name="Issued by",value=f"<@{row['created_by']}> · {row['created_at'][:10]} UTC",inline=False)
         embed.set_footer(text="Private to you · Rewards are once per person · Use Back to list · Menus expire after 10 minutes")
-        return embed,QuestView(interaction,page=page,query=query,unrewarded=unrewarded,quest_id=quest_id)
+        return embed,QuestView(interaction,page=page,query=query,unrewarded=unrewarded,quest_id=quest_id,
+                               manager=row["status"] == "open" and can_manage(interaction, row),
+                               has_deed=row["award_id"] is not None)
     result = await store.quest_board(interaction.guild_id,interaction.user.id,page=page,query=query,unrewarded=unrewarded)
     lines = ["Choose a quest from the dropdown to read its requirements."]
     if result["query"]:

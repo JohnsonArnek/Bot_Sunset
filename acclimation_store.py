@@ -282,9 +282,22 @@ async def quest_board(guild, member, *, page=1, query="", unrewarded=False):
 
 async def quest_for_reader(guild, member, quest_id):
     async with db.DBConnection() as conn:
-        return await conn.fetchone(f"SELECT q.*,a.id AS award_id,a.voided_at AS award_voided_at FROM {_table('quests')} q "
+        return await conn.fetchone(f"SELECT q.*,o.rank AS reader_rank,a.id AS award_id,a.voided_at AS award_voided_at "
+                                   f"FROM {_table('quests')} q "
                                    f"LEFT JOIN {_table('awards')} a ON a.guild_id=q.guild_id AND a.quest_id=q.id AND a.recipient_id=? "
-                                   "WHERE q.guild_id=? AND q.id=?",(member,guild,quest_id))
+                                   f"LEFT JOIN {_table('officials')} o ON o.guild_id=q.guild_id AND o.user_id=? "
+                                   "WHERE q.guild_id=? AND q.id=?",(member,member,guild,quest_id))
+
+
+async def quest_deed(guild, member, quest_id):
+    awards = _table("awards")
+    async with db.DBConnection() as conn:
+        return await conn.fetchone(
+            f"SELECT a.id,a.deed,a.amount,a.issuer_id,a.created_at,a.voided_at,a.void_reason,q.title,"
+            f"(SELECT COALESCE(SUM(h.amount),0) FROM {awards} h WHERE h.guild_id=a.guild_id "
+            f"AND h.recipient_id=a.recipient_id AND h.voided_at IS NULL) AS total FROM {awards} a "
+            f"JOIN {_table('quests')} q ON q.guild_id=a.guild_id AND q.id=a.quest_id "
+            "WHERE a.guild_id=? AND a.recipient_id=? AND a.quest_id=?", (guild, member, quest_id))
 
 
 async def quest_suggestions(guild, query=""):
@@ -305,7 +318,7 @@ async def close_quest(guild, actor, quest_id, *, admin):
         return row
 
 
-async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request_id):
+async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request_id, expected_reward=None):
     deed = clean(deed, 500)
     if actor == member:
         raise ValueError("Another Hand or administrator must approve your own quest completion.")
@@ -317,6 +330,8 @@ async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request
         quest = await conn.fetchone(f"SELECT * FROM {_table('quests')} WHERE guild_id=? AND id=? AND status='open'", (guild, quest_id))
         if not quest:
             raise ValueError("No open quest with that ID exists on this server.")
+        if expected_reward is not None and quest["reward"] != expected_reward:
+            raise ValueError("The quest reward changed. Review the new amount before recording the completion.")
         completed = await conn.fetchone(f"SELECT id FROM {_table('awards')} WHERE guild_id=? AND quest_id=? AND recipient_id=?",
                                        (guild, quest_id, member))
         if completed:
