@@ -270,9 +270,14 @@ choices inside Discord, not links to public quest messages or external pages.
 Navigation reloads current quest and reward data. A closed quest disappears from
 the open list and shows its closed state if it was already selected. Menus belong
 to the reader, server and channel that opened them and expire after ten minutes
-of inactivity; rerun the command after expiry or a bot restart. Browsing does not
-enrol a player or grant a reward. Hands/admins still use `/quest complete` to
-approve a deed, and another official must approve their own quest completion.
+of inactivity. Reopen the board after expiry or a bot restart.
+
+On an open quest, Hands and administrators can choose **Record completion**,
+select the player and write their deed. **Confirm reward** records the displayed
+amount for that player and leaves the quest open. Another official must approve
+their own contribution. **Close quest** asks for confirmation before ending
+future completions. Players can use **View my deed** on an open or closed quest
+to read their recorded contribution, its reward and their current total.
 
 Profiles default to yourself. The honours board lists eligibility for the
 **Sunrise Copper Medal**: **Third Class at 10**, **Second Class at 30**, and

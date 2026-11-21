@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import acclimation_store as store
+from cogs.acclimation_display import award_text, medal, safe
 from cogs.war_share import message_payload
 from cogs.quest_browser import open_board, choices as quest_choices
 
@@ -15,15 +16,6 @@ Amount = app_commands.Range[int, 1, 1_000_000]
 RecordID = app_commands.Range[int, 1, 2**53 - 1]
 Page = app_commands.Range[int, 1, 1_000_000]
 Deed = app_commands.Range[str, 1, 500]
-
-
-def safe(text):
-    return discord.utils.escape_markdown(text)
-
-
-def medal(total):
-    qualified = [name for threshold, name in store.MEDALS if total >= threshold]
-    return qualified[-1] if qualified else "No medal eligibility yet"
 
 
 def progress(total):
@@ -54,29 +46,13 @@ async def member_check(interaction, member):
     return True
 
 
-def award_text(row):
-    duplicate = "Already recorded" if row["duplicate"] else "Acclimation recorded"
-    quest = f" · quest #{row['quest_id']}" if row["quest_id"] is not None else ""
-    lines = [f"**{duplicate} · award #{row['id']}**{quest}",
-             f"<@{row['recipient_id']}> received **{row['amount']:,}** from <@{row['issuer_id']}>.",
-             f"Deed: {safe(row['deed'])}", f"Current total: **{row['total']:,}** · {medal(row['total'])}"]
-    if not row["duplicate"]:
-        reached = [name for threshold, name in store.MEDALS if row["previous"] < threshold <= row["total"]]
-        if reached:
-            lines.append("**Ready for a ceremony:** " + "; ".join(reached) + ".")
-    if row["voided_at"]:
-        lines.append("This award was subsequently voided; it is excluded from the total.")
-    lines.append("Use /acclimation history to read the deeds behind the total.")
-    return "\n".join(lines)
-
-
 def quest_text(row):
     if row is None:
         return "No quest with that ID exists on this server."
     return (f"**Quest #{row['id']}: {safe(row['title'])}** · {row['status']}\n"
             f"{safe(row['details'])}\nReward: **{row['reward']:,} Acclimations** per person, once per quest.\n"
             f"Issued by <@{row['created_by']}> on {row['created_at'][:10]} (UTC).\n"
-            "A Hand or administrator approves completion with /quest complete and records the deed.")
+            "Hands and administrators can open the quest and choose Record completion, or use /quest complete.")
 
 
 class GuildReplies:

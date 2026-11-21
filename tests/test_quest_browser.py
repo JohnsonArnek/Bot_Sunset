@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 from uuid import uuid4
 
 import discord
@@ -23,6 +23,112 @@ def interaction(user=10,guild=100,channel=50):
 class QueryContract:
     async def quest(self,title="Repair roads",details="Northern road repairs",guild=None,request_id=1):
         return await store.create_quest(guild or self.guild,900,title,details,3,admin=True,request_id=request_id)
+
+    async def completion_review(self, i, quest, recipient, deed):
+        _, detail = await browser.render(i, quest_id=quest["id"])
+        await detail.complete.callback(i)
+        picker = i.edit_original_response.await_args.kwargs["view"]
+        person = SimpleNamespace(id=recipient, guild=i.guild, bot=False)
+        i.guild.get_member.return_value = person
+        with patch.object(type(picker.member), "values", new_callable=PropertyMock, return_value=[person]):
+            await picker.member.callback(i)
+        form = i.response.send_modal.await_args.args[0]
+        form.deed._value = deed
+        await form.on_submit(i)
+        return i.edit_original_response.await_args.kwargs
+
+    async def test_quest_controls_record_once_close_separately_and_show_only_my_deed(self):
+        quest = await self.quest()
+        hand = interaction(20, self.guild)
+        hand.guild = SimpleNamespace(id=self.guild, get_member=Mock())
+        await store.appoint(self.guild, 900, 20, "hand", admin=True)
+        recipient = interaction(21, self.guild)
+        _, before = await browser.render(recipient, quest_id=quest["id"])
+        self.assertFalse(any(b in before.children for b in (before.complete, before.close, before.deed)))
+        review = await self.completion_review(hand, quest, 21, "Rebuilt the north bridge")
+        self.assertIn("3 Acclimations", review["embed"].description)
+        self.assertIn("Rebuilt the north bridge", str(review["embed"].to_dict()))
+        self.assertEqual((await store.profile(self.guild, 21))["total"], 0)
+        confirm = review["view"].confirm
+        await confirm.callback(interaction(25, self.guild))
+        self.assertEqual((await store.profile(self.guild, 21))["total"], 0)
+        await confirm.callback(hand)
+        saved = hand.edit_original_response.await_args.kwargs
+        self.assertIn("Acclimation recorded", saved["content"])
+        self.assertEqual((await store.get_quest(self.guild, quest["id"]))["status"], "open")
+        await confirm.callback(hand)
+        self.assertEqual((await store.profile(self.guild, 21))["total"], 3)
+        await saved["view"].close.callback(hand)
+        closure = hand.edit_original_response.await_args.kwargs["view"]
+        self.assertEqual(closure.confirm.label, "Confirm closure")
+        await closure.cancel.callback(hand)
+        self.assertEqual((await store.get_quest(self.guild, quest["id"]))["status"], "open")
+        await hand.edit_original_response.await_args.kwargs["view"].close.callback(hand)
+        await hand.edit_original_response.await_args.kwargs["view"].confirm.callback(hand)
+        closed = hand.edit_original_response.await_args.kwargs["view"]
+        self.assertNotIn(closed.close, closed.children)
+        self.assertNotIn(closed.complete, closed.children)
+        _, earned = await browser.render(recipient, quest_id=quest["id"])
+        self.assertIn(earned.deed, earned.children)
+        await earned.deed.callback(recipient)
+        deed = str(recipient.edit_original_response.await_args.kwargs["embed"].to_dict())
+        self.assertIn("Rebuilt the north bridge", deed)
+        self.assertIn("Your current total", deed)
+        self.assertIsNone(await store.quest_deed(self.guild, hand.user.id, quest["id"]))
+        self.assertIsNone(await store.quest_deed(self.guild + 1, 21, quest["id"]))
+        self.assertNotIn(closed.deed, closed.children)
+        award = (await store.history(self.guild, 21))[0]
+        await store.void_award(self.guild, 900, award["id"], "Entered twice in error", admin=True)
+        _, after_void = await browser.render(recipient, quest_id=quest["id"])
+        await after_void.deed.callback(recipient)
+        corrected = str(recipient.edit_original_response.await_args.kwargs["embed"].to_dict())
+        self.assertIn("Voided award", corrected)
+        self.assertIn("0 Acclimations", corrected)
+
+    async def test_stale_completion_checks_appointment_reward_and_quest_status(self):
+        quest = await self.quest()
+        actor = interaction(20, self.guild)
+        actor.guild = SimpleNamespace(id=self.guild, get_member=Mock())
+        await store.appoint(self.guild, 900, 20, "hand", admin=True)
+        review = await self.completion_review(actor, quest, 21, "Finished")
+        await store.appoint(self.guild, 900, 20, "dismissed", admin=True)
+        await review["view"].confirm.callback(actor)
+        self.assertIn("Only appointed", actor.edit_original_response.await_args.kwargs["content"])
+        actor.permissions = discord.Permissions(administrator=True)
+        review = await self.completion_review(actor, quest, 21, "Finished")
+        async with db.DBConnection() as conn:
+            await conn.execute(f"UPDATE {store._table('quests')} SET reward=8 WHERE id=? AND guild_id=?", (quest["id"], self.guild))
+        await review["view"].confirm.callback(actor)
+        self.assertIn("reward changed", actor.edit_original_response.await_args.kwargs["content"])
+        review = await self.completion_review(actor, quest, 21, "Finished")
+        await store.close_quest(self.guild, 900, quest["id"], admin=True)
+        await review["view"].confirm.callback(actor)
+        self.assertIn("No open quest", actor.edit_original_response.await_args.kwargs["content"])
+        self.assertEqual((await store.profile(self.guild, 21))["total"], 0)
+
+    async def test_picker_rejects_bots_self_and_foreign_members_and_cancel_invalidates_form(self):
+        quest = await self.quest()
+        actor = interaction(900, self.guild)
+        actor.permissions = discord.Permissions(administrator=True)
+        actor.guild = SimpleNamespace(id=self.guild)
+        _, detail = await browser.render(actor, quest_id=quest["id"])
+        await detail.complete.callback(actor)
+        picker = actor.edit_original_response.await_args.kwargs["view"]
+        for uid, guild_id, bot in ((900, self.guild, False), (33, self.guild, True), (33, self.guild+1, False)):
+            person = SimpleNamespace(id=uid, guild=SimpleNamespace(id=guild_id), bot=bot)
+            with patch.object(type(picker.member), "values", new_callable=PropertyMock, return_value=[person]):
+                await picker.member.callback(actor)
+            actor.response.send_modal.assert_not_awaited()
+        player = SimpleNamespace(id=33, guild=actor.guild, bot=False)
+        with patch.object(type(picker.member), "values", new_callable=PropertyMock, return_value=[player]):
+            await picker.member.callback(actor)
+        form = actor.response.send_modal.await_args.args[0]
+        await picker.cancel.callback(actor)
+        actor.edit_original_response.reset_mock()
+        form.deed._value = "Stale form"
+        await form.on_submit(actor)
+        actor.edit_original_response.assert_not_awaited()
+        self.assertIsNone(await store.quest_deed(self.guild, 33, quest["id"]))
 
     async def test_pages_search_and_closure_are_server_scoped(self):
         for n in range(12):
