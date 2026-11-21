@@ -3,17 +3,48 @@ Sunset cog — /sunset help
 Permission-aware private handbooks and administrator utilities.
 """
 
+import asyncio
+import logging
+from weakref import WeakValueDictionary
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from cogs.handbook_browser import open_help, choices
+from cogs.land_members import is_staff
+from cogs.start_panel import StartButton, ensure_panel
 
 
 class SunsetCog(commands.GroupCog, name="sunset"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.panel_locks = WeakValueDictionary()
         super().__init__()
+
+    async def cog_load(self):
+        self.bot.add_dynamic_items(StartButton)
+
+    async def cog_unload(self):
+        self.bot.remove_dynamic_items(StartButton)
+
+    @app_commands.command(name="panel", description="[Staff] Post and pin the Sunset Start here panel in this channel")
+    @app_commands.guild_only()
+    async def panel(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild or not isinstance(interaction.channel, discord.abc.Messageable):
+            return await interaction.followup.send("Run this command in the server channel where you want the panel.", ephemeral=True)
+        try:
+            async with self.panel_locks.setdefault(interaction.channel_id, asyncio.Lock()):
+                if not await is_staff(interaction):
+                    return await interaction.followup.send("Only server staff can set up the Start here panel.", ephemeral=True)
+                notice = await ensure_panel(interaction)
+        except discord.Forbidden:
+            notice = "The bot needs access to view this channel, read its message history, send messages and embed links. Check its permissions and retry."
+        except Exception:
+            logging.getLogger(__name__).exception("Start here setup failed in channel %s", interaction.channel_id)
+            notice = "Setup could not finish. Run this command again here to recover the panel."
+        await interaction.followup.send(notice, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="help", description="Open your private handbooks or find an article")
     @app_commands.guild_only()

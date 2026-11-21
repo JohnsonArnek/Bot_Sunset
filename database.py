@@ -600,17 +600,22 @@ async def update_land_owner(land_id: int, new_owner_id: int):
         await conn.execute("DELETE FROM officers WHERE land_id = ? AND user_id = ?", (land_id, new_owner_id))
 
 
-async def get_land_for_user(guild_id: int, user_id: int) -> dict | None:
-    """Get a land where the user is either owner or member in this guild."""
+async def get_land_for_user(guild_id: int, user_id: int, *, include_officers=False) -> dict | None:
+    """Prefer ownership, then membership. A profile can also include historical officer-only records."""
     land = await get_land_by_owner(guild_id, user_id)
     if land:
         return land
     async with DBConnection() as conn:
-        return await conn.fetchone(
+        member_land = await conn.fetchone(
             "SELECT l.* FROM lands l JOIN members m ON l.id = m.land_id "
             "WHERE l.guild_id = ? AND m.user_id = ?",
             (guild_id, user_id),
         )
+        if member_land or not include_officers:
+            return member_land
+        return await conn.fetchone(
+            "SELECT l.* FROM lands l JOIN officers o ON l.id = o.land_id "
+            "WHERE l.guild_id = ? AND o.user_id = ? ORDER BY l.id LIMIT 1", (guild_id, user_id))
 
 
 async def get_all_lands(guild_id: int) -> list[dict]:
