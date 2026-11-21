@@ -171,7 +171,7 @@ async def render(interaction, *, page=1, query="", unrewarded=False, quest_id=No
 
 
 async def open_board(interaction, **target):
-    # QuestCog's shared interaction check already deferred this reply privately.
+    # Both the quest command and the Start here button acknowledge this reply privately.
     try:
         embed,view = await render(interaction,**target)
     except LookupError:

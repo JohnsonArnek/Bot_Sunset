@@ -4,6 +4,11 @@
 Previous, Next, Contents and Library. `topic` searches article titles, summaries
 and slugs; autocomplete only suggests articles the member can read.
 
+Staff can post and pin a shared **Start here** panel by running `/sunset panel`
+in the intended channel. Its **Handbooks** button opens the same private library.
+Rerunning the command in that channel reuses its panel. The bot needs **Pin
+Messages** for automatic pinning.
+
 Access follows existing server permissions:
 
 | Handbook | Readers |
