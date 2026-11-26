@@ -50,7 +50,8 @@ def quest_text(row):
     if row is None:
         return "No quest with that ID exists on this server."
     return (f"**Quest #{row['id']}: {safe(row['title'])}** · {row['status']}\n"
-            f"{safe(row['details'])}\nReward: **{row['reward']:,} Acclimations** per person, once per quest.\n"
+            f"{safe(row['details'])}\n**{row['quest_type'].title()}** · {store.QUEST_TYPES[row['quest_type']]}\n"
+            f"Reward: **{row['reward']:,} Acclimations** per approved completion.\n"
             f"Issued by <@{row['created_by']}> on {row['created_at'][:10]} (UTC).\n"
             "Hands and administrators can open the quest and choose Record completion, or use /quest complete.")
 
@@ -151,7 +152,8 @@ class AcclimationCog(GuildReplies, commands.GroupCog, name="acclimation", group_
                     "Administrators appoint Hands and Tribunes with /acclimation deputize. These are bot appointments, not Discord permissions.\n"
                     "Hands may award any number; each Tribune may award one Acclimation total per UTC day (no carry-over). "
                     "Every award needs a deed, and another official must recognise your own deeds.\n"
-                    "Hands and administrators issue quests and approve completion. Each person earns a quest's reward once. "
+                    "Hands and administrators approve quest rewards. General quests pay once per member, unique quests close "
+                    "on the first approved completion, and repeatable quests pay for each newly approved deed. "
                     "Quest rewards do not use the recipient's Tribune allowance.\n"
                     "Sunrise Copper Medal eligibility: 10 Third Class, 30 Second Class, 50 First Class. "
                     "Arrange ceremonies and items in-game; /acclimation honours and history provide the names and deeds.\n"
@@ -161,10 +163,15 @@ class AcclimationCog(GuildReplies, commands.GroupCog, name="acclimation", group_
 @app_commands.guild_only()
 class QuestCog(GuildReplies, commands.GroupCog, name="quest", group_description="Issue quests and approve Acclimation rewards"):
     @app_commands.command(description="[Hand/Admin] Issue a quest with an Acclimation reward")
+    @app_commands.rename(quest_type="type")
+    @app_commands.describe(quest_type="Who can earn the reward and how often (default: General)")
+    @app_commands.choices(quest_type=[app_commands.Choice(name=f"{kind.title()} · {rule}", value=kind)
+                                     for kind, rule in store.QUEST_TYPES.items()])
     async def create(self, interaction: discord.Interaction, title: app_commands.Range[str, 1, 80],
-                     details: app_commands.Range[str, 1, 700], reward: Amount):
+                     details: app_commands.Range[str, 1, 700], reward: Amount, quest_type: str = "general"):
         await perform(interaction, store.create_quest(interaction.guild_id, interaction.user.id, title, details, reward,
-                                                    admin=interaction.permissions.administrator, request_id=interaction.id), quest_text)
+                                                    admin=interaction.permissions.administrator, request_id=interaction.id,
+                                                    quest_type=quest_type), quest_text)
 
     @app_commands.command(name="list", description="Browse open quests with selectable details, filters and page buttons")
     @app_commands.describe(query="Optional words from the title or requirements, or a quest ID")

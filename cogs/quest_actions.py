@@ -120,7 +120,7 @@ class QuestActionView(QuestScreen):
         await self.replace(interaction, self.back)
 
 
-async def record_completion(interaction, *, quest_id, member_id, deed, reward):
+async def record_completion(interaction, *, quest_id, member_id, deed, reward, completion_no):
     member = interaction.guild.get_member(member_id)
     if member is None:
         try:
@@ -131,7 +131,7 @@ async def record_completion(interaction, *, quest_id, member_id, deed, reward):
         raise ValueError("Choose a player from this server.")
     award = await store.complete_quest(interaction.guild_id, interaction.user.id, quest_id, member_id, deed,
                                        admin=interaction.permissions.administrator, request_id=interaction.id,
-                                       expected_reward=reward)
+                                       expected_reward=reward, expected_completion=completion_no)
     return award_text(award)
 
 
@@ -140,9 +140,37 @@ async def close_quest(interaction, *, quest_id):
     return f"Quest #{quest_id} closed. Earlier deeds and rewards remain in the record."
 
 
-async def deed_card(interaction, *, quest_id, back):
-    award = await store.quest_deed(interaction.guild_id, interaction.user.id, quest_id)
-    view = QuestActionView(interaction, quest_id, back)
+class QuestDeedsView(QuestScreen):
+    def __init__(self, interaction, quest_id, back, award):
+        super().__init__(interaction)
+        self.quest_id, self.back = quest_id, back
+        self.number = award["completion_no"] if award else 0
+        if award and award["latest"] > 1:
+            self.older.disabled = self.number <= 1
+            self.newer.disabled = self.number >= award["latest"]
+        else:
+            self.remove_item(self.older)
+            self.remove_item(self.newer)
+
+    async def go(self, interaction, number):
+        await self.replace(interaction, partial(deed_card, quest_id=self.quest_id, back=self.back, completion_no=number))
+
+    @discord.ui.button(label="Older deed")
+    async def older(self, interaction, button):
+        await self.go(interaction, self.number - 1)
+
+    @discord.ui.button(label="Newer deed")
+    async def newer(self, interaction, button):
+        await self.go(interaction, self.number + 1)
+
+    @discord.ui.button(label="Back to quest")
+    async def cancel(self, interaction, button):
+        await self.replace(interaction, self.back)
+
+
+async def deed_card(interaction, *, quest_id, back, completion_no=None):
+    award = await store.quest_deed(interaction.guild_id, interaction.user.id, quest_id, completion_no)
+    view = QuestDeedsView(interaction, quest_id, back, award)
     embed = discord.Embed(title="Your quest deed", colour=discord.Colour.gold())
     if award is None:
         embed.description = "You have no recorded deed for this quest."
@@ -154,7 +182,7 @@ async def deed_card(interaction, *, quest_id, back):
     embed.add_field(name="Recorded by", value=f"<@{award['issuer_id']}> · {award['created_at'][:10]} UTC", inline=False)
     if award["voided_at"]:
         embed.add_field(name="Voided award", value=safe(award["void_reason"] or "Excluded from the total."), inline=False)
-    embed.set_footer(text=f"Award #{award['id']}")
+    embed.set_footer(text=f"Completion {award['completion_no']:,} of {award['latest']:,} · Award #{award['id']}")
     return embed, view
 
 
@@ -178,7 +206,7 @@ async def action_card(interaction, *, quest_id, action, back, member_id=None, de
         target = await store.quest_for_reader(interaction.guild_id, member_id, quest_id)
         if target is None or target["status"] != "open":
             embed.description = "This quest is no longer open."
-        elif target["award_id"] is not None:
+        elif target["award_id"] is not None and target["quest_type"] != "repeatable":
             embed.description = f"<@{member_id}> already received this quest’s reward (award #{target['award_id']})."
         else:
             try:
@@ -187,7 +215,13 @@ async def action_card(interaction, *, quest_id, action, back, member_id=None, de
                 embed.description = str(exc)
             else:
                 embed.description = f"Award **{row['reward']:,} Acclimations** to <@{member_id}> for this deed?"
+                number = (target["completion_no"] or 0) + 1
+                if target["quest_type"] == "unique":
+                    embed.description += " This will close the quest for everyone."
+                elif target["quest_type"] == "repeatable":
+                    embed.description += f" This is their completion **#{number}**."
                 embed.add_field(name="Deed", value=safe(deed), inline=False)
-                commit = partial(record_completion, quest_id=quest_id, member_id=member_id, deed=deed, reward=row["reward"])
+                commit = partial(record_completion, quest_id=quest_id, member_id=member_id, deed=deed,
+                                 reward=row["reward"], completion_no=number)
                 view.confirm_with("Confirm reward", commit, discord.ButtonStyle.success)
     return embed, view

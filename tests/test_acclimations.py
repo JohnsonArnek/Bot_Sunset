@@ -223,6 +223,20 @@ class AcclimationCommands(unittest.IsolatedAsyncioTestCase):
                                            permissions=discord.Permissions(administrator=True),
                                            response=AsyncMock(), followup=AsyncMock())
 
+    async def test_creation_exposes_three_types_and_defaults_to_general(self):
+        options = self.quest.create.to_dict(self.quest.__cog_app_commands_group__)["options"]
+        option = next(item for item in options if item["name"] == "type")
+        self.assertFalse(option["required"])
+        self.assertEqual({c["value"] for c in option["choices"]}, {"general", "unique", "repeatable"})
+        for index, kind in enumerate(("general", "unique", "repeatable")):
+            self.interaction.id += 1
+            supplied = {} if index == 0 else {"quest_type": kind}
+            await self.quest.create.callback(self.quest, self.interaction, "Quest", "Do the work", 2, **supplied)
+            self.assertIn(store.QUEST_TYPES[kind], response_text(self.interaction))
+            self.assertEqual((await store.quests(10))[0]["quest_type"], kind)
+        with self.assertRaises(ValueError):
+            await store.create_quest(10, 1, "Quest", "Do the work", 2, admin=True, request_id=999, quest_type="unknown")
+
     async def test_commands_check_authority_and_do_not_grant_discord_roles(self):
         i = self.interaction
         for cog in (self.cog, self.quest):

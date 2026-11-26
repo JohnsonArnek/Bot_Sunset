@@ -10,6 +10,28 @@ MEDALS = ((10, "Sunrise Copper Medal — Third Class"),
           (30, "Sunrise Copper Medal — Second Class"),
           (50, "Sunrise Copper Medal — First Class"))
 TABLES = ("guilds", "officials", "appointments", "quests", "awards", "tribune_days")
+QUEST_TYPES = {
+    "general": "Once per member",
+    "unique": "One completion across the server",
+    "repeatable": "Every approved completion earns the reward",
+}
+QUEST_TYPE_COLUMN = "TEXT NOT NULL DEFAULT 'general' CHECK (quest_type IN ('general','unique','repeatable'))"
+COMPLETION_COLUMN = "INTEGER NOT NULL DEFAULT 1 CHECK (completion_no >= 1)"
+
+
+def _awards_table(name, quests, identity):
+    return f"""CREATE TABLE IF NOT EXISTS {name} (
+        id {identity}, guild_id BIGINT NOT NULL, request_id BIGINT NOT NULL,
+        recipient_id BIGINT NOT NULL, issuer_id BIGINT NOT NULL,
+        amount INTEGER NOT NULL CHECK (amount BETWEEN 1 AND 1000000),
+        deed TEXT NOT NULL, created_at TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('hand', 'tribune', 'quest')),
+        quest_id BIGINT, voided_by BIGINT, voided_at TEXT, void_reason TEXT,
+        completion_no {COMPLETION_COLUMN},
+        UNIQUE (guild_id, id), UNIQUE (guild_id, request_id),
+        FOREIGN KEY (guild_id, quest_id) REFERENCES {quests} (guild_id, id),
+        CHECK ((source = 'quest' AND quest_id IS NOT NULL) OR (source != 'quest' AND quest_id IS NULL))
+    )"""
 
 
 def schema(postgres):
@@ -32,23 +54,13 @@ def schema(postgres):
             id {identity}, guild_id BIGINT NOT NULL,
             request_id BIGINT NOT NULL, title TEXT NOT NULL, details TEXT NOT NULL,
             reward INTEGER NOT NULL CHECK (reward BETWEEN 1 AND 1000000),
+            quest_type {QUEST_TYPE_COLUMN},
             status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
             created_by BIGINT NOT NULL, created_at TEXT NOT NULL,
             closed_by BIGINT, closed_at TEXT,
             UNIQUE (guild_id, id), UNIQUE (guild_id, request_id)
         );
-        CREATE TABLE IF NOT EXISTS {prefix}awards (
-            id {identity}, guild_id BIGINT NOT NULL, request_id BIGINT NOT NULL,
-            recipient_id BIGINT NOT NULL, issuer_id BIGINT NOT NULL,
-            amount INTEGER NOT NULL CHECK (amount BETWEEN 1 AND 1000000),
-            deed TEXT NOT NULL, created_at TEXT NOT NULL,
-            source TEXT NOT NULL CHECK (source IN ('hand', 'tribune', 'quest')),
-            quest_id BIGINT, voided_by BIGINT, voided_at TEXT, void_reason TEXT,
-            UNIQUE (guild_id, id), UNIQUE (guild_id, request_id),
-            UNIQUE (guild_id, quest_id, recipient_id),
-            FOREIGN KEY (guild_id, quest_id) REFERENCES {prefix}quests (guild_id, id),
-            CHECK ((source = 'quest' AND quest_id IS NOT NULL) OR (source != 'quest' AND quest_id IS NULL))
-        );
+        {_awards_table(prefix + 'awards', prefix + 'quests', identity)};
         CREATE TABLE IF NOT EXISTS {prefix}tribune_days (
             guild_id BIGINT NOT NULL, issuer_id BIGINT NOT NULL, day TEXT NOT NULL,
             award_id BIGINT NOT NULL,
@@ -61,8 +73,36 @@ def schema(postgres):
     """
     if postgres:
         sql = "CREATE SCHEMA IF NOT EXISTS sunset_acclimations; REVOKE ALL ON SCHEMA sunset_acclimations FROM PUBLIC; " + sql
+        sql += f"""
+            ALTER TABLE {prefix}quests ADD COLUMN IF NOT EXISTS quest_type {QUEST_TYPE_COLUMN};
+            ALTER TABLE {prefix}awards ADD COLUMN IF NOT EXISTS completion_no {COMPLETION_COLUMN};
+            ALTER TABLE {prefix}awards DROP CONSTRAINT IF EXISTS awards_guild_id_quest_id_recipient_id_key;
+        """
         sql += " ".join(f"ALTER TABLE {prefix}{table} ENABLE ROW LEVEL SECURITY;" for table in TABLES)
-    return sql
+    return sql + f"""CREATE UNIQUE INDEX IF NOT EXISTS acclimation_completion_idx
+        ON {prefix}awards (guild_id,quest_id,recipient_id,completion_no) WHERE quest_id IS NOT NULL;"""
+
+
+async def migrate_sqlite_quest_types(conn):
+    # The startup connection has foreign keys off. Keep the referenced table's
+    # final name and IDs stable when replacing SQLite's old inline UNIQUE rule.
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        async with conn.execute("PRAGMA table_info(acclimation_quests)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if columns and "quest_type" not in columns:
+            await conn.execute(f"ALTER TABLE acclimation_quests ADD COLUMN quest_type {QUEST_TYPE_COLUMN}")
+            await conn.execute(_awards_table("acclimation_awards_new", "acclimation_quests", "INTEGER PRIMARY KEY AUTOINCREMENT"))
+            fields = "id,guild_id,request_id,recipient_id,issuer_id,amount,deed,created_at,source,quest_id,voided_by,voided_at,void_reason"
+            await conn.execute(f"INSERT INTO acclimation_awards_new ({fields}) SELECT {fields} FROM acclimation_awards")
+            await conn.execute("UPDATE sqlite_sequence SET seq=MAX(seq,(SELECT seq FROM sqlite_sequence WHERE name='acclimation_awards')) "
+                               "WHERE name='acclimation_awards_new' AND EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='acclimation_awards')")
+            await conn.execute("DROP TABLE acclimation_awards")
+            await conn.execute("ALTER TABLE acclimation_awards_new RENAME TO acclimation_awards")
+        await conn.commit()
+    except BaseException:
+        await conn.rollback()
+        raise
 
 
 def _table(name):
@@ -154,11 +194,11 @@ async def profile(guild, member):
     return dict(total=total, rank=rank, remaining=0 if used else 1)
 
 
-async def _record(conn, guild, actor, member, amount, deed, request_id, source, quest_id, now):
+async def _record(conn, guild, actor, member, amount, deed, request_id, source, quest_id, now, completion_no=1):
     previous = await _total(conn, guild, member)
     row = await conn.execute_returning_one(
-        f"INSERT INTO {_table('awards')} (guild_id,request_id,recipient_id,issuer_id,amount,deed,created_at,source,quest_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?) RETURNING *", (guild, request_id, member, actor, amount, deed, now, source, quest_id))
+        f"INSERT INTO {_table('awards')} (guild_id,request_id,recipient_id,issuer_id,amount,deed,created_at,source,quest_id,completion_no) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING *", (guild, request_id, member, actor, amount, deed, now, source, quest_id, completion_no))
     return row | dict(previous=previous, total=previous + amount, duplicate=False)
 
 
@@ -224,18 +264,20 @@ async def honours(guild, page=1):
                                    "ORDER BY total DESC,recipient_id LIMIT 10 OFFSET ?", (guild, (page - 1) * 10))
 
 
-async def create_quest(guild, actor, title, details, reward, *, admin, request_id):
+async def create_quest(guild, actor, title, details, reward, *, admin, request_id, quest_type="general"):
     title, details = clean(title, 80), clean(details, 700)
     positive(reward)
+    if quest_type not in QUEST_TYPES:
+        raise ValueError("Choose a general, unique or repeatable quest.")
     async with _write(guild) as conn:
         await _quest_authority(conn, guild, actor, admin)
         existing = await conn.fetchone(f"SELECT * FROM {_table('quests')} WHERE guild_id=? AND request_id=?", (guild, request_id))
         if existing:
             return existing
         return await conn.execute_returning_one(f"INSERT INTO {_table('quests')} "
-                                               "(guild_id,request_id,title,details,reward,created_by,created_at) "
-                                               "VALUES (?,?,?,?,?,?,?) RETURNING *",
-                                               (guild, request_id, title, details, reward, actor, utc_now().isoformat()))
+                                               "(guild_id,request_id,title,details,reward,created_by,created_at,quest_type) "
+                                               "VALUES (?,?,?,?,?,?,?,?) RETURNING *",
+                                               (guild, request_id, title, details, reward, actor, utc_now().isoformat(), quest_type))
 
 
 async def get_quest(guild, quest_id):
@@ -252,6 +294,12 @@ async def quests(guild, page=1):
 QUEST_PAGE_SIZE = 10
 
 
+def _latest_award_join():
+    awards = _table("awards")
+    return (f" LEFT JOIN {awards} a ON a.id=(SELECT h.id FROM {awards} h WHERE h.guild_id=q.guild_id "
+            "AND h.quest_id=q.id AND h.recipient_id=? ORDER BY h.completion_no DESC LIMIT 1) ")
+
+
 def _quest_search(query):
     query = " ".join((query or "").split())
     if len(query) > 80:
@@ -262,42 +310,51 @@ def _quest_search(query):
     return query, " AND (LOWER(q.title) LIKE ? ESCAPE '!' OR LOWER(q.details) LIKE ? ESCAPE '!' OR CAST(q.id AS TEXT)=?)", (pattern,pattern,query.lstrip("#"))
 
 
-async def quest_board(guild, member, *, page=1, query="", unrewarded=False):
-    """Page open quests with this reader's reward status; voids still consume claims."""
+async def quest_board(guild, member, *, page=1, query="", unrewarded=False, quest_type=None):
+    """Page open quests with this reader's eligibility and latest completion."""
     if type(page) is not int or page < 1:
         page = 1
     query, search, params = _quest_search(query)
-    base = (f"FROM {_table('quests')} q LEFT JOIN {_table('awards')} a "
-            "ON a.guild_id=q.guild_id AND a.quest_id=q.id AND a.recipient_id=? "
-            "WHERE q.guild_id=? AND q.status='open'" + search + (" AND a.id IS NULL" if unrewarded else ""))
+    base = (f"FROM {_table('quests')} q" + _latest_award_join() + "WHERE q.guild_id=? AND q.status='open'" + search
+            + (" AND (a.id IS NULL OR q.quest_type='repeatable')" if unrewarded else ""))
     params = (member,guild) + params
+    if quest_type is not None:
+        base += " AND q.quest_type=?"
+        params += (quest_type,)
     async with db.DBConnection() as conn:
         count = await conn.fetchone("SELECT COUNT(*) AS total " + base,params)
         pages = max(1,(count["total"]+QUEST_PAGE_SIZE-1)//QUEST_PAGE_SIZE)
         page = min(page,pages)
-        rows = await conn.fetchall("SELECT q.*,a.id AS award_id,a.voided_at AS award_voided_at " + base +
+        rows = await conn.fetchall("SELECT q.*,a.id AS award_id,a.voided_at AS award_voided_at,a.completion_no " + base +
                                   " ORDER BY q.id DESC LIMIT ? OFFSET ?",params+(QUEST_PAGE_SIZE,(page-1)*QUEST_PAGE_SIZE))
         return dict(rows=rows,total=count["total"],page=page,pages=pages,query=query)
 
 
 async def quest_for_reader(guild, member, quest_id):
     async with db.DBConnection() as conn:
-        return await conn.fetchone(f"SELECT q.*,o.rank AS reader_rank,a.id AS award_id,a.voided_at AS award_voided_at "
-                                   f"FROM {_table('quests')} q "
-                                   f"LEFT JOIN {_table('awards')} a ON a.guild_id=q.guild_id AND a.quest_id=q.id AND a.recipient_id=? "
+        return await conn.fetchone(f"SELECT q.*,o.rank AS reader_rank,a.id AS award_id,a.voided_at AS award_voided_at,a.completion_no "
+                                   f"FROM {_table('quests')} q" + _latest_award_join() +
                                    f"LEFT JOIN {_table('officials')} o ON o.guild_id=q.guild_id AND o.user_id=? "
                                    "WHERE q.guild_id=? AND q.id=?",(member,member,guild,quest_id))
 
 
-async def quest_deed(guild, member, quest_id):
+async def quest_deed(guild, member, quest_id, completion_no=None):
     awards = _table("awards")
+    condition = ""
+    params = (guild, member, quest_id)
+    if completion_no is not None:
+        condition = " AND a.completion_no=?"
+        params += (completion_no,)
     async with db.DBConnection() as conn:
         return await conn.fetchone(
-            f"SELECT a.id,a.deed,a.amount,a.issuer_id,a.created_at,a.voided_at,a.void_reason,q.title,"
+            f"SELECT a.id,a.deed,a.amount,a.issuer_id,a.created_at,a.voided_at,a.void_reason,a.completion_no,q.title,"
+            f"(SELECT MAX(h.completion_no) FROM {awards} h WHERE h.guild_id=a.guild_id "
+            f"AND h.quest_id=a.quest_id AND h.recipient_id=a.recipient_id) AS latest,"
             f"(SELECT COALESCE(SUM(h.amount),0) FROM {awards} h WHERE h.guild_id=a.guild_id "
             f"AND h.recipient_id=a.recipient_id AND h.voided_at IS NULL) AS total FROM {awards} a "
             f"JOIN {_table('quests')} q ON q.guild_id=a.guild_id AND q.id=a.quest_id "
-            "WHERE a.guild_id=? AND a.recipient_id=? AND a.quest_id=?", (guild, member, quest_id))
+            f"WHERE a.guild_id=? AND a.recipient_id=? AND a.quest_id=?{condition} "
+            "ORDER BY a.completion_no DESC LIMIT 1", params)
 
 
 async def quest_suggestions(guild, query=""):
@@ -318,7 +375,7 @@ async def close_quest(guild, actor, quest_id, *, admin):
         return row
 
 
-async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request_id, expected_reward=None):
+async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request_id, expected_reward=None, expected_completion=None):
     deed = clean(deed, 500)
     if actor == member:
         raise ValueError("Another Hand or administrator must approve your own quest completion.")
@@ -332,8 +389,17 @@ async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request
             raise ValueError("No open quest with that ID exists on this server.")
         if expected_reward is not None and quest["reward"] != expected_reward:
             raise ValueError("The quest reward changed. Review the new amount before recording the completion.")
-        completed = await conn.fetchone(f"SELECT id FROM {_table('awards')} WHERE guild_id=? AND quest_id=? AND recipient_id=?",
-                                       (guild, quest_id, member))
-        if completed:
+        completed = await conn.fetchone(f"SELECT MAX(completion_no) AS latest FROM {_table('awards')} "
+                                        "WHERE guild_id=? AND quest_id=? AND recipient_id=?", (guild, quest_id, member))
+        number = (completed["latest"] or 0) + 1
+        if number > 1 and quest["quest_type"] != "repeatable":
             raise ValueError("This member already received this quest's reward (including any later void).")
-        return await _record(conn, guild, actor, member, quest["reward"], deed, request_id, "quest", quest_id, utc_now().isoformat())
+        if expected_completion is not None and expected_completion != number:
+            raise ValueError("Another completion was recorded for this player. Review their latest deed before awarding again.")
+        now = utc_now().isoformat()
+        award = await _record(conn, guild, actor, member, quest["reward"], deed, request_id, "quest", quest_id, now, number)
+        if quest["quest_type"] == "unique":
+            await conn.execute(f"UPDATE {_table('quests')} SET status='closed',closed_by=?,closed_at=? WHERE guild_id=? AND id=?",
+                               (actor, now, guild, quest_id))
+            award["closed_unique_quest"] = True
+        return award

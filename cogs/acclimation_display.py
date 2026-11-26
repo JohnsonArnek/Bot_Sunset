@@ -26,5 +26,7 @@ def award_text(row):
             lines.append("**Ready for a ceremony:** " + "; ".join(reached) + ".")
     if row["voided_at"]:
         lines.append("This award was subsequently voided; it is excluded from the total.")
+    if row.get("closed_unique_quest"):
+        lines.append("This unique quest is now closed.")
     lines.append("Use /acclimation history to read the deeds behind the total.")
     return "\n".join(lines)
