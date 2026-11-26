@@ -10,6 +10,7 @@ from uuid import uuid4
 import discord
 
 import acclimation_store as store
+import quest_submissions as submissions
 import database as db
 from cogs import quest_browser as browser
 from cogs.acclimations import QuestCog
@@ -23,6 +24,111 @@ def interaction(user=10,guild=100,channel=50):
 class QueryContract:
     async def quest(self,title="Repair roads",details="Northern road repairs",guild=None,request_id=1):
         return await store.create_quest(guild or self.guild,900,title,details,3,admin=True,request_id=request_id)
+
+    async def test_member_submission_return_revision_approval_and_privacy(self):
+        quest = await self.quest()
+        member, hand = interaction(31, self.guild), interaction(32, self.guild)
+        await store.appoint(self.guild, 900, 32, "hand", admin=True)
+        hand.guild = SimpleNamespace(get_member=Mock(return_value=SimpleNamespace(bot=False)))
+        _, screen = await browser.render(member, quest_id=quest["id"])
+        await screen.submit.callback(member)
+        form = member.response.send_modal.await_args.args[0]
+        form.deed._value, form.link._value = "Delivered a load", f"https://discord.com/channels/{self.guild}/2/3"
+        await form.on_submit(member)
+        result = member.edit_original_response.await_args.kwargs
+        self.assertIn("Awaiting review", str(result["embed"].to_dict()))
+        self.assertNotIn(result["view"].submit, result["view"].children)
+        self.assertEqual((await store.profile(self.guild, 31))["total"], 0)
+        pending = (await submissions.pending_for_review(self.guild, 32, admin=False))[0]["id"]
+        self.assertIsNone(await submissions.detail(self.guild, 33, pending, review=False, admin=False))
+        self.assertIsNone(await submissions.detail(self.guild+1, 31, pending, review=False, admin=False))
+        with self.assertRaises(ValueError):
+            await submissions.listing(self.guild, 33, review=True, admin=False)
+        with self.assertRaises(ValueError):
+            await submissions.return_deed(self.guild, 31, pending, "Self-review", admin=True)
+        with self.assertRaises(ValueError):
+            await submissions.submit(self.guild, 31, quest["id"], "Other", None, request_id=110)
+        _, board = await browser.render(hand)
+        await board.reviews.callback(hand)
+        review_list = hand.edit_original_response.await_args.kwargs["view"]
+        await review_list.navigate(hand, 1, pending)
+        review = hand.edit_original_response.await_args.kwargs["view"]
+        await review.send_back.callback(hand)
+        note = hand.response.send_modal.await_args.args[0]
+        note.note._value = "Which depot?"
+        await note.on_submit(hand)
+        _, mine = await browser.render(member, quest_id=quest["id"])
+        await mine.mine.callback(member)
+        await member.edit_original_response.await_args.kwargs["view"].navigate(member, 1, pending)
+        returned = member.edit_original_response.await_args.kwargs
+        self.assertIn("Which depot?", str(returned["embed"].to_dict()))
+        await returned["view"].revise.callback(member)
+        revision = member.response.send_modal.await_args.args[0]
+        self.assertEqual(revision.deed.default, "Delivered a load")
+        revision.deed._value = "Delivered oak to the north depot"
+        member.id += 1
+        await revision.on_submit(member)
+        candidate = (await submissions.pending_for_review(self.guild, 32, admin=False))[0]["id"]
+        self.assertNotEqual(candidate, pending)
+        from cogs.quest_reviews import submission_screen
+        _, decision = await submission_screen(hand, selection=candidate, review=True)
+        await decision.approve.callback(hand)
+        saved = await submissions.detail(self.guild, 31, candidate, admin=False, review=False)
+        self.assertEqual((saved["status"], saved["revision_of"]), ("approved", pending))
+        award = await store.quest_deed(self.guild, 31, quest["id"])
+        self.assertEqual((award["id"], award["deed"], award["total"]), (saved["award_id"], revision.deed.value, 3))
+
+    async def test_unique_submissions_race_and_repeatable_witnessed_completion(self):
+        guild = self.guild
+        q = await store.create_quest(guild, 900, "Crown", "Find it", 3, admin=True, request_id=1, quest_type="unique")
+        async def submit(member, request):
+            return await submissions.submit(guild, member, q["id"], "Found it", None, request_id=request)
+        one, two = await submit(31, 2), await submit(32, 3)
+        self.assertEqual((await submit(31, 2))["id"], one["id"])
+        async def approve(s, req):
+            return await store.complete_quest(guild, 900, q["id"], s["member_id"], s["deed"], admin=True,
+                                              request_id=req, submission_id=s["id"])
+        results = await asyncio.gather(approve(one, 4), approve(two, 5), return_exceptions=True)
+        self.assertEqual(sum(isinstance(result, dict) for result in results), 1)
+        states = [(await submissions.detail(guild, s["member_id"], s["id"], admin=False, review=False))["status"] for s in (one,two)]
+        self.assertEqual(set(states), {"closed","approved"})
+        q = await store.create_quest(guild, 900, "Supply", "Deliver", 2, admin=True, request_id=6, quest_type="repeatable")
+        one, two = await submit(31, 7), await submit(31, 8)
+        with self.assertRaisesRegex(ValueError, "Several submissions"):
+            await store.complete_quest(guild, 900, q["id"], 31, "Found it", admin=True, request_id=9)
+        await approve(one, 10)
+        self.assertTrue((await approve(one, 10))["duplicate"])
+        with self.assertRaises(ValueError):
+            await approve(one, 11)
+        await store.complete_quest(guild, 900, q["id"], 31, "Found it", admin=True, request_id=12)
+        self.assertEqual((await submissions.detail(guild, 31, two["id"], admin=False, review=False))["status"], "approved")
+        for link in ("https://example.org", f"https://discord.com/channels/{guild+1}/2/3"):
+            with self.assertRaises(ValueError):
+                await submissions.submit(guild, 31, q["id"], "Work", link, request_id=13)
+
+    async def test_failed_or_revoked_approval_keeps_the_deed_pending_and_unpaid(self):
+        q = await self.quest()
+        await store.appoint(self.guild, 900, 50, "hand", admin=True)
+        s = await submissions.submit(self.guild, 31, q["id"], "Restored the bridge", None, request_id=2)
+        async def approve():
+            return await store.complete_quest(self.guild, 50, q["id"], 31, s["deed"], admin=False, request_id=3,
+                                              submission_id=s["id"], expected_reward=q["reward"])
+        original = db.DBConnection.execute
+        async def fail_decision(conn, query, params=()):
+            if "SET status='approved',reviewer_id" in query:
+                raise RuntimeError("simulated interrupted approval")
+            return await original(conn, query, params)
+        with patch.object(db.DBConnection, "execute", fail_decision), self.assertRaises(RuntimeError):
+            await approve()
+        self.assertEqual((await store.profile(self.guild, 31))["total"], 0)
+        self.assertEqual(await submissions.review_count(self.guild, 50, admin=False), 1)
+        await store.appoint(self.guild, 900, 50, "dismissed", admin=True)
+        with self.assertRaises(ValueError):
+            await approve()
+        await store.close_quest(self.guild, 900, q["id"], admin=True)
+        saved = await submissions.detail(self.guild, 31, s["id"], admin=False, review=False)
+        self.assertEqual(saved["status"], "closed")
+        self.assertIn("closed", saved["note"])
 
     async def completion_review(self, i, quest, recipient, deed):
         _, detail = await browser.render(i, quest_id=quest["id"])

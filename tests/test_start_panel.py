@@ -9,6 +9,9 @@ import discord
 
 import database as db
 import handbook_store
+import acclimation_store as acclimations
+import quest_submissions
+from cogs.attention import attention_card
 from cogs.start_panel import StartButton, panel_card
 from cogs.sunset import SunsetCog
 
@@ -30,6 +33,7 @@ def posted_message(message_id, *, author=99):
     message = SimpleNamespace(id=message_id, author=SimpleNamespace(id=author), pinned=False,
                               components=[SimpleNamespace(children=[button])], jump_url=f"https://discord.com/channels/100/250/{message_id}")
     message.pin = AsyncMock(side_effect=lambda **kwargs: setattr(message, "pinned", True))
+    message.edit = AsyncMock()
     return message
 
 
@@ -40,6 +44,29 @@ class StartPanelTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(db, "IS_POSTGRES", False))
         self.enterContext(patch.object(db, "DB_PATH", str(Path(temp.name) / "panel.db")))
         await db.init_db()
+
+    async def test_attention_routes_current_owner_reviewer_and_ledger_staff(self):
+        await db.create_land(100, "Hill", 10)
+        land = await db.get_land_by_owner(100, 10)
+        req = await db.create_claim_request(land["id"], 1, "Builds")
+        await db.update_request_status(req, "approved")
+        await db.add_ledger_owed(land["id"], 100, 1)
+        await db.set_config(100, "staff_role_id", "77")
+        q = await acclimations.create_quest(100, 900, "Deliver oak", "Bring supplies", 2, admin=True, request_id=30)
+        deed = await quest_submissions.submit(100, 10, q["id"], "Brought oak", None, request_id=31)
+        await acclimations.appoint(100, 900, 11, "hand", admin=True)
+        owner, hand, staff = reader(10), reader(11), reader(12, roles=(77,))
+        self.assertIn("Weekly offer", (await attention_card(owner))[0].description)
+        self.assertEqual((await attention_card(owner, selection=("offer", req)))[0].title, "Weekly banner allocation")
+        self.assertNotIn("Weekly offer", (await attention_card(hand))[0].description)
+        self.assertIn("Review deed", (await attention_card(hand))[0].description)
+        self.assertIn("Settlement ledger", (await attention_card(staff))[0].description)
+        self.assertIn("Hill", (await attention_card(staff, selection=("ledger", land["id"])))[0].title)
+        self.assertNotIn("Brought oak", str((await attention_card(staff, selection=("review", deed["id"])))[0].to_dict()))
+        self.assertIn("caught up", (await attention_card(reader(13)))[0].description)
+        await quest_submissions.return_deed(100, 11, deed["id"], "Please give a location", admin=False)
+        self.assertIn("Revise deed", (await attention_card(owner))[0].description)
+        self.assertIn("Please give a location", str((await attention_card(owner, selection=("revise", deed["id"])))[0].to_dict()))
 
     async def test_persistent_buttons_open_private_screens_for_the_current_reader(self):
         client = Mock()
@@ -52,9 +79,10 @@ class StartPanelTests(unittest.IsolatedAsyncioTestCase):
                                                        summary="Test article", pages=["Test page"])])
         panel = panel_card()["view"]
         self.assertTrue(panel.is_persistent())
-        self.assertEqual([b.item.label for b in panel.children], ["My settlement", "My account", "Open quests", "Handbooks"])
-        for button, title in zip(panel.children, ("Hill", "Personal bank account", "Open quest board", "Sunset handbooks")):
+        self.assertEqual([b.item.label for b in panel.children], ["My settlement", "My account", "Open quests", "Handbooks", "Needs my attention"])
+        for button, title in zip(panel.children, ("Hill", "Personal bank account", "Open quest board", "Sunset handbooks", "Needs my attention")):
             i = reader()
+            i.message = posted_message(501)
             match = StartButton.__discord_ui_compiled_template__.fullmatch(button.custom_id)
             restored = await StartButton.from_custom_id(i, button.item, match)
             await restored.callback(i)
@@ -64,6 +92,7 @@ class StartPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(card["embed"].title, title)
             self.assertEqual(card["allowed_mentions"].to_dict(), discord.AllowedMentions.none().to_dict())
             i.edit_original_response.assert_not_awaited()
+            i.message.edit.assert_awaited_once()
         visitor = reader(22)
         await panel.children[0].callback(visitor)
         card = visitor.followup.send.await_args.kwargs
@@ -98,6 +127,7 @@ class StartPanelTests(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_awaited_once()
         self.assertEqual(original.pin.await_count, 2)
         self.assertEqual(await db.get_config(100, "start_panel:250"), "501")
+        self.assertIn("sunset:start:attention", [b.custom_id for b in original.edit.await_args.kwargs["view"].children])
         channel.fetch_message.side_effect = discord.NotFound(Mock(status=404, reason="Not Found"),
                                                            {"message": "Unknown Message", "code": 10008})
         await restarted.panel.callback(restarted, i)
