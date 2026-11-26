@@ -55,6 +55,12 @@ database error leaves balances, approvals, purchases, chunks and the delivery
 ledger unchanged. Retries of the same interaction return its original receipt.
 Delivery still needs to be confirmed separately after the items arrive.
 
+Owners can open **My settlement → Other banner purchases** on the pinned panel.
+Choose an available reserve or leftover banner, select how to pay, then review
+the settlement, price and payment method before choosing **Confirm purchase**.
+Each purchase is for one banner. Reserve stock at the protected minimum stays
+off the menu. Weekly offers have their own **Review offer** button.
+
 Land accounts follow the stable land ID across ownership changes. Deleting a land
 or using `/sunset nuke` does not delete its bank history or money; administrators
 can inspect and reconcile the archived account using `account_id`. Reusing the
@@ -224,6 +230,11 @@ amount and story. Appointments and rewards are separate for each Discord server.
 All commands reply privately and disable mention notifications; members can
 read the shared records using the commands below.
 
+Open **Start here → Honours** for your medal progress and **My deeds** for the
+stories behind your awards. Appointed Hands and Tribunes can choose **Give
+Acclimation**, select a member, write the deed and confirm the award. A Tribune
+sees whether today's award is available and when it resets.
+
 Administrators appoint both ranks with `/acclimation deputize member:@Name rank:hand`
 or `rank:tribune`. These are appointments **inside the bot** and do not grant
 Discord roles or administrator permissions. An administrator who wants to make
@@ -267,6 +278,10 @@ exact quest ID. The type dropdown narrows the board to General, Unique or Repeat
 quests the reader has yet to complete. Voiding an award corrects the total
 and preserves the original completion.
 Search and filter choices stay in place when returning from a quest.
+
+Hands and Discord administrators can choose **Create quest** on this board.
+Select **General**, **Unique** or **Repeatable**, then enter the title,
+completion requirements and reward. Submitting the form opens the new quest.
 
 `/quest show quest_id:123` opens the same detail panel. Its quest_id option now
 accepts text so typing a title provides suggestions; selecting one supplies its

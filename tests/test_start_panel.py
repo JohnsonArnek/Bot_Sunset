@@ -79,10 +79,12 @@ class StartPanelTests(unittest.IsolatedAsyncioTestCase):
                                                        summary="Test article", pages=["Test page"])])
         panel = panel_card()["view"]
         self.assertTrue(panel.is_persistent())
-        self.assertEqual([b.item.label for b in panel.children], ["My settlement", "My account", "Open quests", "Handbooks", "Needs my attention"])
-        for button, title in zip(panel.children, ("Hill", "Personal bank account", "Open quest board", "Sunset handbooks", "Needs my attention")):
+        self.assertEqual([b.item.label for b in panel.children], ["My settlement", "My account", "Honours", "Open quests", "Needs my attention", "Handbooks"])
+        self.assertEqual([len(row["components"]) for row in panel.to_components()], [3, 3])
+        for button, title in zip(panel.children, ("Hill", "Personal bank account", "My honours", "Open quest board", "Needs my attention", "Sunset handbooks")):
             i = reader()
             i.message = posted_message(501)
+            i.message.components[0].children.append(SimpleNamespace(custom_id="sunset:start:attention"))
             match = StartButton.__discord_ui_compiled_template__.fullmatch(button.custom_id)
             restored = await StartButton.from_custom_id(i, button.item, match)
             await restored.callback(i)
@@ -93,6 +95,7 @@ class StartPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(card["allowed_mentions"].to_dict(), discord.AllowedMentions.none().to_dict())
             i.edit_original_response.assert_not_awaited()
             i.message.edit.assert_awaited_once()
+            self.assertIn("sunset:start:honours", [b.custom_id for b in i.message.edit.await_args.kwargs["view"].children])
         visitor = reader(22)
         await panel.children[0].callback(visitor)
         card = visitor.followup.send.await_args.kwargs

@@ -14,6 +14,35 @@ from cogs.weekly_offers import OfferAction, review_request
 from cogs.report_view import clip
 
 
+def purchase_embed(receipt):
+    bank_paid = receipt["payment"] == "bank"
+    embed = discord.Embed(title="Purchase already recorded" if receipt["duplicate"] else "Claim purchase recorded",
+                          colour=discord.Colour.gold())
+    embed.add_field(name="Land", value=discord.utils.escape_markdown(receipt["land_name"])[:240], inline=True)
+    embed.add_field(name="Blocks", value=str(receipt["blocks"]), inline=True)
+    embed.add_field(name="Total chunks after purchase", value=str(receipt["chunks"]), inline=True)
+    embed.add_field(name="Price", value=f"{receipt['blocks']:,} × {receipt['unit_price']:,} = **{receipt['total']:,} ems**", inline=False)
+    payment = "Bank transfer to central treasury" if bank_paid else "Manual payment (no bank debit)"
+    embed.add_field(name="Payment", value=payment if receipt["total"] else "Free", inline=False)
+    if bank_paid:
+        embed.add_field(name="Settlement balance after payment", value=f"{receipt['balance']:,} ems", inline=False)
+    if receipt.get("banner"):
+        b = receipt["banner"]
+        quantity = receipt["blocks"]
+        if "sale_result" in receipt:
+            released = receipt["released_blocks"]
+            embed.add_field(name="Public banner account", value=(
+                f"Unsold liability cleared **{released:,} × {b['unit_cost']:,} = {released*b['unit_cost']:,} ems**\n"
+                f"Sale result **{receipt['sale_result']:+,} ems** · see /bank public"), inline=False)
+        embed.add_field(name="Creation funding to settle", value=(
+            f"{quantity:,} × {b['unit_cost']:,} = **{quantity*b['unit_cost']:,} ems** to be destroyed at creation.\n"
+            f"Land share: {quantity*b['land_unit']:,} · central subsidy: {quantity*(b['unit_cost']-b['land_unit']):,} ems.\n"
+            f"Land contribution prepaid by bank: {quantity*b['prepaid_unit']:,} ems.\n"
+            f"Track with /banner show purchase_id:{receipt['operation_id']}"), inline=False)
+    embed.set_footer(text=f"Receipt #{receipt['operation_id']} · Delivery is recorded separately in the block ledger")
+    return embed
+
+
 async def submit_request(interaction, land, chunks, purpose, *, profile_view=None):
     from_profile = profile_view is not None
     try:
@@ -95,29 +124,7 @@ class ClaimsCog(commands.GroupCog, name="claim"):
         except ValueError as exc:
             return await interaction.followup.send(str(exc), ephemeral=True,
                                                    allowed_mentions=discord.AllowedMentions.none())
-        embed = discord.Embed(title="Purchase already recorded" if receipt["duplicate"] else "Claim purchase recorded",
-                              colour=discord.Colour.gold())
-        embed.add_field(name="Land", value=discord.utils.escape_markdown(receipt["land_name"])[:240], inline=True)
-        embed.add_field(name="Blocks", value=str(receipt["blocks"]), inline=True)
-        embed.add_field(name="Total chunks after purchase", value=str(receipt["chunks"]), inline=True)
-        embed.add_field(name="Price", value=f"{receipt['blocks']:,} × {receipt['unit_price']:,} = **{receipt['total']:,} ems**", inline=False)
-        embed.add_field(name="Payment", value="Bank transfer to central treasury" if private else "Manual payment (no bank debit)", inline=False)
-        if private:
-            embed.add_field(name="Settlement balance after payment", value=f"{receipt['balance']:,} ems", inline=False)
-        if receipt.get("banner"):
-            b = receipt["banner"]
-            quantity = receipt["blocks"]
-            if "sale_result" in receipt:
-                released = receipt["released_blocks"]
-                embed.add_field(name="Public banner account", value=(
-                    f"Unsold liability cleared **{released:,} × {b['unit_cost']:,} = {released*b['unit_cost']:,} ems**\n"
-                    f"Sale result **{receipt['sale_result']:+,} ems** · see /bank public"), inline=False)
-            embed.add_field(name="Creation funding to settle", value=(
-                f"{quantity:,} × {b['unit_cost']:,} = **{quantity*b['unit_cost']:,} ems** to be destroyed at creation.\n"
-                f"Land share: {quantity*b['land_unit']:,} · central subsidy: {quantity*(b['unit_cost']-b['land_unit']):,} ems.\n"
-                f"Land contribution prepaid by bank: {quantity*b['prepaid_unit']:,} ems.\n"
-                f"Track with /banner show purchase_id:{receipt['operation_id']}"), inline=False)
-        embed.set_footer(text=f"Receipt #{receipt['operation_id']} · Delivery is recorded separately in the block ledger")
+        embed = purchase_embed(receipt)
         await interaction.followup.send(embed=embed, ephemeral=private, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="buy", description="Buy your land's weekly claim blocks using manual payment or its bank account")

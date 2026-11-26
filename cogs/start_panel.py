@@ -8,6 +8,7 @@ import discord
 import database as db
 from cogs import handbook_browser, quest_browser
 from cogs.attention import attention_card
+from cogs.honours import honours_card
 from cogs.bank_screens import account_card
 from cogs.report_view import NO_MENTIONS
 from cogs.settlement_profile import directory_card, profile_card
@@ -15,20 +16,21 @@ from cogs.settlement_profile import directory_card, profile_card
 
 log = logging.getLogger(__name__)
 SECTIONS = {
-    "settlement": ("My settlement", "🏰"),
-    "account": ("My account", "💰"),
-    "quests": ("Open quests", "📜"),
-    "handbooks": ("Handbooks", "📚"),
-    "attention": ("Needs my attention", "📌"),
+    "settlement": ("My settlement", "🏰", 0),
+    "account": ("My account", "💰", 0),
+    "honours": ("Honours", "🏅", 0),
+    "quests": ("Open quests", "📜", 1),
+    "attention": ("Needs my attention", "📌", 1),
+    "handbooks": ("Handbooks", "📚", 1),
 }
 
 
 class StartButton(discord.ui.DynamicItem[discord.ui.Button],
-                  template=r"sunset:start:(?P<section>settlement|account|quests|handbooks|attention)"):
+                  template=r"sunset:start:(?P<section>settlement|account|quests|handbooks|attention|honours)"):
     def __init__(self, section):
-        label, emoji = SECTIONS[section]
+        label, emoji, row = SECTIONS[section]
         style = discord.ButtonStyle.primary if section == "settlement" else discord.ButtonStyle.secondary
-        super().__init__(discord.ui.Button(label=label, emoji=emoji, custom_id=f"sunset:start:{section}", style=style))
+        super().__init__(discord.ui.Button(label=label, emoji=emoji, custom_id=f"sunset:start:{section}", style=style, row=row))
         self.section = section
 
     @classmethod
@@ -40,7 +42,7 @@ class StartButton(discord.ui.DynamicItem[discord.ui.Button],
             return await interaction.response.send_message("Open the Start here panel inside your server.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
         message = getattr(interaction, "message", None)
-        if message and is_panel(message, interaction.client.user.id) and not has_button(message, "attention"):
+        if message and is_panel(message, interaction.client.user.id) and not has_button(message, "honours"):
             try:
                 await message.edit(**panel_card())
             except discord.HTTPException:
@@ -58,6 +60,9 @@ class StartButton(discord.ui.DynamicItem[discord.ui.Button],
                 card = await account_card(interaction)
             elif self.section == "attention":
                 embed, view = await attention_card(interaction)
+                card = dict(embed=embed, view=view)
+            elif self.section == "honours":
+                embed, view = await honours_card(interaction)
                 card = dict(embed=embed, view=view)
             else:
                 embed, view = await handbook_browser.render(interaction)
@@ -112,7 +117,7 @@ async def ensure_panel(interaction):
             if is_panel(candidate, interaction.client.user.id):
                 message = candidate
 
-    if message is not None and not has_button(message, "attention"):
+    if message is not None and not has_button(message, "honours"):
         await message.edit(**panel_card())
     if message is None:
         pending = f"pending:{attempt}"

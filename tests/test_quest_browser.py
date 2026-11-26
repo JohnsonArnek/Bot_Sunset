@@ -13,6 +13,7 @@ import acclimation_store as store
 import quest_submissions as submissions
 import database as db
 from cogs import quest_browser as browser
+from cogs.honours import honours_card
 from cogs.acclimations import QuestCog
 
 
@@ -22,6 +23,94 @@ def interaction(user=10,guild=100,channel=50):
 
 
 class QueryContract:
+    async def test_honours_uses_the_current_appointment_and_shows_personal_history(self):
+        giver, recipient = interaction(33, self.guild), interaction(42, self.guild)
+        person = SimpleNamespace(id=42, guild=SimpleNamespace(id=self.guild), bot=False)
+        giver.guild = SimpleNamespace(get_member=Mock(return_value=person))
+        giver.permissions = discord.Permissions(administrator=True)
+        _, public = await honours_card(giver)
+        self.assertNotIn(public.give, public.children)
+
+        async def prepare(rank, deed):
+            if (await store.profile(self.guild, 33))["rank"] != rank:
+                await store.appoint(self.guild, 900, 33, rank, admin=True)
+            _, home = await honours_card(giver)
+            await home.give.callback(giver)
+            picker = giver.edit_original_response.await_args.kwargs["view"]
+            with patch.object(type(picker.recipient), "values", new_callable=PropertyMock, return_value=[person]):
+                await picker.recipient.callback(giver)
+            form = giver.response.send_modal.await_args.args[0]
+            self.assertEqual(form.amount in form.children, rank == "hand")
+            form.deed._value, form.amount._value = deed, "10"
+            giver.id += 1
+            await form.on_submit(giver)
+            return giver.edit_original_response.await_args.kwargs["view"]
+
+        preview = await prepare("tribune", "Repaired a bridge")
+        self.assertEqual((await store.profile(self.guild, 42))["total"], 0)
+        await preview.confirm.callback(recipient)
+        recipient.response.send_message.assert_awaited_once()
+        await preview.confirm.callback(giver)
+        saved = giver.edit_original_response.await_args.kwargs
+        self.assertIn("Already given", str(saved["embed"].to_dict()))
+        self.assertTrue(saved["view"].give.disabled)
+        self.assertEqual((await store.profile(self.guild, 42))["total"], 1)
+        preview = await prepare("hand", "Donated oak")
+        await store.appoint(self.guild, 900, 33, "dismissed", admin=True)
+        await preview.confirm.callback(giver)
+        self.assertIn("deputized", giver.edit_original_response.await_args.kwargs["content"])
+        for deed in ("Donated oak", "Organised construction"):
+            preview = await prepare("hand", deed)
+            await preview.confirm.callback(giver)
+        home, menu = await honours_card(recipient)
+        self.assertIn("21 Acclimations", home.description)
+        await menu.deeds.callback(recipient)
+        latest = recipient.edit_original_response.await_args.kwargs
+        self.assertIn("Organised construction", latest["embed"].description)
+        await latest["view"].next_page.callback(recipient)
+        older = recipient.edit_original_response.await_args.kwargs
+        self.assertIn("Repaired a bridge", older["embed"].description)
+        self.assertTrue(older["view"].next_page.disabled)
+
+    async def test_create_quest_from_filtered_board_and_recheck_authority(self):
+        issuer = interaction(30, self.guild)
+        await store.appoint(self.guild, 900, 30, "tribune", admin=True)
+        _, board = await browser.render(issuer)
+        self.assertNotIn(board.create, board.children)
+
+        async def open_form(kind):
+            _, board = await browser.render(issuer, query="bridge", quest_type="repeatable")
+            self.assertIn(board.create, board.children)
+            await board.create.callback(issuer)
+            picker = issuer.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual({opt.value for opt in picker.kind.options}, set(store.QUEST_TYPES))
+            picker.kind._values = [kind]
+            await picker.kind.callback(issuer)
+            form = issuer.response.send_modal.await_args.args[0]
+            form.name._value, form.requirements._value = "Bridge patrol", "Walk the whole bridge"
+            return form
+
+        await store.appoint(self.guild, 900, 30, "hand", admin=True)
+        form = await open_form("unique")
+        form.reward._value = "0"
+        await form.on_submit(issuer)
+        issuer.response.send_message.assert_awaited_once()
+        form.reward._value = "5"
+        await store.appoint(self.guild, 900, 30, "dismissed", admin=True)
+        await form.on_submit(issuer)
+        self.assertEqual((await store.quest_board(self.guild, 30))["total"], 0)
+        issuer.permissions = discord.Permissions(administrator=True)
+        form = await open_form("unique")
+        form.reward._value = "5"
+        await form.on_submit(issuer)
+        card = issuer.edit_original_response.await_args.kwargs
+        self.assertIn("Bridge patrol", card["embed"].title)
+        quest = await store.get_quest(self.guild, card["view"].quest_id)
+        self.assertEqual((quest["details"], quest["reward"], quest["quest_type"]), ("Walk the whole bridge", 5, "unique"))
+        await card["view"].back.callback(issuer)
+        board = issuer.edit_original_response.await_args.kwargs["view"]
+        self.assertEqual((board.query, board.quest_type), ("bridge", "repeatable"))
+
     async def quest(self,title="Repair roads",details="Northern road repairs",guild=None,request_id=1):
         return await store.create_quest(guild or self.guild,900,title,details,3,admin=True,request_id=request_id)
 

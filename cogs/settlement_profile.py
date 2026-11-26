@@ -10,6 +10,7 @@ import database as db
 import models
 import weekly_claims as weekly
 from cogs.bank_screens import account_card
+from cogs.banner_checkout import pool_card
 from cogs.claims import submit_request
 from cogs.land_members import is_staff, member_card
 from cogs.ledger import can_read_land, settlement_embed
@@ -209,6 +210,11 @@ async def profile_card(interaction, *, land_id, directory_page=None, private=Fal
     if max(len(officers), len(members)) > 18:
         view.add_item(ProfileAction("Full roster", partial(roster_card, land_id=land_id), row=1))
     refresh = partial(profile_card, land_id=land_id, directory_page=directory_page, private=True)
+    if interaction.user.id == land["owner_id"]:
+        async def purchases(i):
+            embed, checkout = await pool_card(i, land_id, refresh)
+            return dict(embed=embed, view=checkout)
+        view.add_item(ProfileAction("Other banner purchases", purchases, row=2, replace=private))
     view.add_item(ProfileAction("Member management", partial(member_card, land_id=land_id, back=refresh),
                                 row=1, replace=private))
     view.add_item(ProfileAction("Refresh", refresh, row=1, replace=private))

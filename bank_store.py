@@ -211,8 +211,31 @@ async def adjust(guild, actor, amount, reason, *, admin, request_id, withdraw=Fa
         return await _record(conn, guild, actor, request_id, action, reason, receipt, [(row["id"], delta, after)])
 
 
+def _pool_stock(reserve, kind):
+    if not reserve:
+        return 0
+    if kind == "leftover":
+        return reserve["leftover_blocks"]
+    return max(0, reserve["total_blocks"] - reserve["protected_min"])
+
+
+def _claim_price(kind, chunks, full_price):
+    return models.reserve_price(full_price) if kind == "reserve" else models.block_price(chunks, full_price)
+
+
+async def other_banner_offers(guild, actor, land_id):
+    import banner_store
+    async with db.DBConnection() as conn:
+        land = await conn.fetchone("SELECT id,name,chunks FROM lands WHERE guild_id=? AND owner_id=? AND id=?", (guild, actor, land_id))
+        if not land:
+            raise ValueError("Only the current owner can buy banners for this settlement.")
+        reserve = await conn.fetchone("SELECT * FROM reserve WHERE guild_id=?", (guild,))
+        full = await banner_store.unit_cost(conn, guild)
+    return land["name"], {kind: _claim_price(kind, land["chunks"], full) for kind in ("reserve", "leftover") if _pool_stock(reserve, kind) > 0}
+
+
 async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal",
-                    allocation_id=None, quote=None):
+                    allocation_id=None, quote=None, expected_land_id=None):
     import banner_store
     import banner_account
     if kind not in ("normal", "reserve", "leftover") or payment not in ("manual", "bank"):
@@ -220,6 +243,8 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
     async with write(guild) as conn:
         prior = await _replay(conn, guild, actor, request_id, f"claim-{kind}")
         if prior:
+            if expected_land_id is not None and prior["land_id"] != expected_land_id:
+                raise ValueError("This receipt belongs to another settlement.")
             if allocation_id is not None and prior.get("claim_request_id") != allocation_id:
                 raise ValueError("This receipt belongs to another allocation.")
             if prior["payment"] != payment:
@@ -228,6 +253,9 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
         lock = " FOR UPDATE" if db.IS_POSTGRES else ""
         land_sql = "SELECT * FROM lands WHERE guild_id=? AND owner_id=?"
         params = (guild, actor)
+        if expected_land_id is not None:
+            land_sql += " AND id=?"
+            params += (expected_land_id,)
         if allocation_id is not None:
             land_sql += " AND id=(SELECT land_id FROM claim_requests WHERE id=?)"
             params += (allocation_id,)
@@ -257,15 +285,16 @@ async def buy_claim(guild, actor, *, request_id, payment="manual", kind="normal"
         else:
             await conn.execute("INSERT INTO reserve (guild_id,total_blocks,protected_min,leftover_blocks) VALUES (?,0,3,0) ON CONFLICT DO NOTHING", (guild,))
             reserve = await conn.fetchone("SELECT * FROM reserve WHERE guild_id=?" + lock, (guild,))
-            available = reserve["leftover_blocks"] if kind == "leftover" else reserve["total_blocks"] - reserve["protected_min"]
-            if available < 1:
+            if _pool_stock(reserve, kind) < 1:
                 raise ValueError("No blocks are available in that pool (protected reserves are not for sale).")
         full_price = await banner_store.unit_cost(conn, guild)
         if not 1 <= blocks <= 2_000_000_000 or not 0 <= land["chunks"] <= 2_000_000_000 - blocks:
             raise ValueError("The configured price or recorded chunk count is invalid; ask an administrator to review it.")
-        unit = models.reserve_price(full_price) if kind == "reserve" else models.block_price(land["chunks"], full_price)
+        unit = _claim_price(kind, land["chunks"], full_price)
         total = unit * blocks
         if quote is not None and quote != (blocks, unit):
+            if kind != "normal":
+                raise ValueError("The price changed. Reopen Other banner purchases to review the new price.")
             raise ValueError("Your allocation or price changed. Open My allocation in /queue to see the current price.")
         if total > 2_000_000_000:
             raise ValueError("This purchase exceeds the supported transaction amount.")

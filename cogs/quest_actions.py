@@ -1,16 +1,14 @@
 """Reader-bound quest screens and confirmations."""
 
 from functools import partial
-import logging
 
 import discord
 
 import acclimation_store as store
-from cogs.acclimation_display import award_text, safe
-from cogs.report_view import NO_MENTIONS
+from cogs.acclimation_display import award_text, check_recipient, safe
+from cogs.private_screen import PrivateScreen
 
 
-log = logging.getLogger("claims-bot")
 TEMPORARY = "The quest board could not be loaded. Please try /quest list again shortly."
 UNAVAILABLE = "That quest is unavailable on this server. Use /quest list to browse current quests."
 
@@ -19,58 +17,10 @@ def can_manage(interaction, row):
     return interaction.permissions.administrator or row["reader_rank"] == "hand"
 
 
-class QuestScreen(discord.ui.View):
-    def __init__(self, interaction):
-        super().__init__(timeout=600)
-        self.owner, self.guild, self.channel = interaction.user.id, interaction.guild_id, interaction.channel_id
-        self.source = interaction
-        self.busy = False
-
-    async def interaction_check(self, interaction):
-        if (interaction.user.id != self.owner or interaction.guild_id != self.guild or interaction.channel_id != self.channel
-                or self.is_finished() or self.busy):
-            await interaction.response.send_message("Use your latest quest board, or open your own with /quest list.",
-                                                   ephemeral=True, allowed_mentions=NO_MENTIONS)
-            return False
-        return True
-
-    async def replace(self, interaction, render_next, *, commit=None):
-        if not await self.interaction_check(interaction):
-            return
-        self.busy = True
-        notice = next_view = None
-        try:
-            await interaction.response.defer()
-            if commit:
-                try:
-                    notice = await commit(interaction)
-                except ValueError as exc:
-                    notice = str(exc)
-            embed, next_view = await render_next(interaction)
-            await interaction.edit_original_response(content=notice, embed=embed, view=next_view, allowed_mentions=NO_MENTIONS)
-        except Exception as exc:
-            if next_view:
-                next_view.stop()
-            message = UNAVAILABLE if isinstance(exc, LookupError) else TEMPORARY
-            if not isinstance(exc, LookupError):
-                log.warning("Quest screen unavailable (%s)", type(exc).__name__)
-            if notice:
-                message = f"{notice}\nReopen the quest for its latest status."
-            try:
-                await interaction.edit_original_response(content=message, embed=None, view=None, allowed_mentions=NO_MENTIONS)
-            except (discord.HTTPException, OSError, TimeoutError):
-                log.warning("Quest screen update could not be displayed")
-        finally:
-            self.stop()
-
-    async def on_timeout(self):
-        self.stop()
-        for item in self.children:
-            item.disabled = True
-        try:
-            await self.source.edit_original_response(view=self)
-        except (discord.HTTPException, OSError, TimeoutError):
-            log.info("Expired quest screen could not be updated")
+class QuestScreen(PrivateScreen):
+    stale = "Use your latest quest board, or open your own with /quest list."
+    unavailable = UNAVAILABLE
+    temporary = TEMPORARY
 
 
 class DeedForm(discord.ui.Modal, title="Record the deed"):
@@ -121,14 +71,7 @@ class QuestActionView(QuestScreen):
 
 
 async def record_completion(interaction, *, quest_id, member_id, deed, reward, completion_no=None, submission_id=None):
-    member = interaction.guild.get_member(member_id)
-    if member is None:
-        try:
-            member = await interaction.guild.fetch_member(member_id)
-        except discord.NotFound:
-            raise ValueError("That player has left the server.") from None
-    if member.bot:
-        raise ValueError("Choose a player from this server.")
+    await check_recipient(interaction.guild, member_id)
     award = await store.complete_quest(interaction.guild_id, interaction.user.id, quest_id, member_id, deed,
                                        admin=interaction.permissions.administrator, request_id=interaction.id,
                                        expected_reward=reward, expected_completion=completion_no, submission_id=submission_id)
