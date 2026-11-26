@@ -209,7 +209,7 @@ def war_schema(postgres: bool) -> str:
 
 async def init_db():
     """Create all tables if they don't exist and run schema migrations. Called on startup."""
-    from acclimation_store import schema as acclimation_schema
+    from acclimation_store import schema as acclimation_schema, migrate_sqlite_quest_types
     from handbook_store import schema as handbook_schema
     from bank_store import schema as bank_schema
     from banner_store import schema as banner_schema
@@ -460,6 +460,7 @@ async def init_db():
             )
             # Soft migrations
             await db.executescript(war_schema(False))
+            await migrate_sqlite_quest_types(db)
             await db.executescript(acclimation_schema(False))
             await db.executescript(handbook_schema(False))
             await db.executescript(bank_schema(False))

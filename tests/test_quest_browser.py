@@ -37,6 +37,83 @@ class QueryContract:
         await form.on_submit(i)
         return i.edit_original_response.await_args.kwargs
 
+    async def test_unique_claim_race_closes_once_and_replay_survives_closure(self):
+        quest = await store.create_quest(self.guild, 900, "Find the crown", "Recover the lost crown", 7,
+                                         admin=True, request_id=1, quest_type="unique")
+        async def finish(member):
+            return await store.complete_quest(self.guild, 900, quest["id"], member, "Recovered the crown",
+                                              admin=True, request_id=member)
+        results = await asyncio.gather(finish(21), finish(22), return_exceptions=True)
+        self.assertEqual(sum(isinstance(r, ValueError) for r in results), 1)
+        winner = next(r for r in results if isinstance(r, dict))
+        self.assertTrue(winner["closed_unique_quest"])
+        replay = await finish(winner["recipient_id"])
+        self.assertEqual(replay["id"], winner["id"])
+        self.assertTrue(replay["duplicate"])
+        await store.void_award(self.guild, 900, winner["id"], "Correction", admin=True)
+        self.assertEqual((await store.get_quest(self.guild, quest["id"]))["status"], "closed")
+        self.assertEqual((await store.quest_board(self.guild, 21))["total"], 0)
+        with self.assertRaises(ValueError):
+            await finish(23)
+
+    async def test_repeatable_keeps_each_deed_the_board_and_retries_consistent(self):
+        quest = await store.create_quest(self.guild, 900, "Stock the depot", "Deliver a load", 3,
+                                         admin=True, request_id=1, quest_type="repeatable")
+        staff = interaction(900, self.guild)
+        staff.guild = SimpleNamespace(id=self.guild, get_member=Mock())
+        staff.permissions = discord.Permissions(administrator=True)
+        staff.id = 51
+        first = await self.completion_review(staff, quest, 21, "Delivered oak")
+        await first["view"].confirm.callback(staff)
+        replay = await store.complete_quest(self.guild, 900, quest["id"], 21, "Delivered oak", admin=True, request_id=51)
+        self.assertTrue(replay["duplicate"])
+        second = await self.completion_review(staff, quest, 21, "Delivered birch")
+        stale = await self.completion_review(staff, quest, 21, "Delivered birch")
+        self.assertIn("#2", second["embed"].description)
+        staff.id = 52
+        await second["view"].confirm.callback(staff)
+        staff.id = 53
+        await stale["view"].confirm.callback(staff)
+        self.assertIn("Another completion", staff.edit_original_response.await_args.kwargs["content"])
+        await store.void_award(self.guild, 900, replay["id"], "Partial load", admin=True)
+        board = await store.quest_board(self.guild, 21, unrewarded=True)
+        self.assertEqual((board["total"], len(board["rows"]), board["rows"][0]["completion_no"]), (1, 1, 2))
+        await store.close_quest(self.guild, 900, quest["id"], admin=True)
+        player = interaction(21, self.guild)
+        _, view = await browser.render(player, quest_id=quest["id"])
+        self.assertEqual(view.deed.label, "View my deeds")
+        await view.deed.callback(player)
+        latest = player.edit_original_response.await_args.kwargs
+        self.assertIn("Delivered birch", str(latest["embed"].to_dict()))
+        await latest["view"].older.callback(player)
+        older = player.edit_original_response.await_args.kwargs
+        self.assertIn("Delivered oak", str(older["embed"].to_dict()))
+        self.assertIn("Partial load", str(older["embed"].to_dict()))
+        self.assertTrue(older["view"].older.disabled)
+        await older["view"].newer.callback(player)
+        self.assertTrue(player.edit_original_response.await_args.kwargs["view"].newer.disabled)
+        self.assertEqual((await store.profile(self.guild, 21))["total"], 3)
+
+    async def test_type_filter_combines_with_eligibility_and_survives_back(self):
+        await self.quest(title="Road survey")
+        q = await store.create_quest(self.guild, 900, "Road cargo", "Deliver a load", 1,
+                                     admin=True, request_id=2, quest_type="repeatable")
+        await store.complete_quest(self.guild, 900, q["id"], 21, "First load", admin=True, request_id=3)
+        player = interaction(21, self.guild)
+        _, view = await browser.render(player, query="Road", unrewarded=True)
+        menu = next(c for c in view.children if isinstance(c, browser.QuestTypeSelect))
+        menu._values = ["repeatable"]
+        await menu.callback(player)
+        listing = player.edit_original_response.await_args.kwargs
+        self.assertNotIn("Road survey", listing["embed"].description)
+        select = next(c for c in listing["view"].children if isinstance(c, browser.QuestSelect))
+        self.assertEqual(len(select.options), 1)
+        select._values = [str(q["id"])]
+        await select.callback(player)
+        await player.edit_original_response.await_args.kwargs["view"].back.callback(player)
+        returned = player.edit_original_response.await_args.kwargs["view"]
+        self.assertEqual((returned.quest_type, returned.query, returned.unrewarded), ("repeatable", "Road", True))
+
     async def test_quest_controls_record_once_close_separately_and_show_only_my_deed(self):
         quest = await self.quest()
         hand = interaction(20, self.guild)

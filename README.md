@@ -235,7 +235,11 @@ names do not automatically grant Acclimation authority.
 - **Tribunes:** may give exactly **one Acclimation total per UTC day**. Their
   allowance resets at **00:00 UTC**, with no accumulation of unused days.
 - **Quests:** Hands and administrators issue quests and approve completion.
-  A quest pays its fixed reward once per member, separately from Tribune allowances.
+  The optional **type** on `/quest create` sets who can earn the fixed reward.
+  **General** pays once per member and is the default for existing and new quests.
+  **Unique** closes as soon as the first member's completion is approved.
+  **Repeatable** pays for each approved deed, including later deeds by the same member.
+  Quest awards are separate from Tribune allowances.
   Another official must recognise your own deed or approve your own quest completion.
 
 | Purpose | Command |
@@ -258,8 +262,10 @@ names do not automatically grant Acclimation authority.
 page. Select a title from the dropdown to read requirements, reward, issuer and
 your own reward status; use Previous, Next, Back to list and Refresh to navigate
 the same message. `/quest list query:roads` searches titles, requirements or an
-exact quest ID. The filter offers All open quests or Not yet rewarded; voided
-awards still count as previously rewarded because they cannot be claimed again.
+exact quest ID. The type dropdown narrows the board to General, Unique or Repeatable.
+**Available to me** includes open repeatable quests and open
+quests the reader has yet to complete. Voiding an award corrects the total
+and preserves the original completion.
 Search and filter choices stay in place when returning from a quest.
 
 `/quest show quest_id:123` opens the same detail panel. Its quest_id option now
@@ -274,10 +280,11 @@ of inactivity. Reopen the board after expiry or a bot restart.
 
 On an open quest, Hands and administrators can choose **Record completion**,
 select the player and write their deed. **Confirm reward** records the displayed
-amount for that player and leaves the quest open. Another official must approve
+amount for that player. On a unique quest the confirmation also closes the quest. Another official must approve
 their own contribution. **Close quest** asks for confirmation before ending
 future completions. Players can use **View my deed** on an open or closed quest
-to read their recorded contribution, its reward and their current total.
+to read their recorded contribution, its reward and their current total. After
+multiple completions, **View my deeds** opens the latest record with buttons to browse older and newer deeds.
 
 Profiles default to yourself. The honours board lists eligibility for the
 **Sunrise Copper Medal**: **Third Class at 10**, **Second Class at 30**, and
