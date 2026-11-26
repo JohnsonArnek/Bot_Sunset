@@ -206,7 +206,7 @@ class AcclimationPostgres(AccountingContract, unittest.IsolatedAsyncioTestCase):
             row = await conn.fetchone("SELECT bool_and(relrowsecurity) AS rls,count(*) AS tables, "
                                      "has_schema_privilege('public','sunset_acclimations','USAGE') AS public_access "
                                      "FROM pg_class WHERE relnamespace='sunset_acclimations'::regnamespace AND relkind='r'")
-        self.assertEqual(row, dict(rls=True, tables=6, public_access=False))
+        self.assertEqual(row, dict(rls=True, tables=len(store.TABLES), public_access=False))
 
 
 class AcclimationCommands(unittest.IsolatedAsyncioTestCase):

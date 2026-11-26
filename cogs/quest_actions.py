@@ -120,7 +120,7 @@ class QuestActionView(QuestScreen):
         await self.replace(interaction, self.back)
 
 
-async def record_completion(interaction, *, quest_id, member_id, deed, reward, completion_no):
+async def record_completion(interaction, *, quest_id, member_id, deed, reward, completion_no=None, submission_id=None):
     member = interaction.guild.get_member(member_id)
     if member is None:
         try:
@@ -131,7 +131,7 @@ async def record_completion(interaction, *, quest_id, member_id, deed, reward, c
         raise ValueError("Choose a player from this server.")
     award = await store.complete_quest(interaction.guild_id, interaction.user.id, quest_id, member_id, deed,
                                        admin=interaction.permissions.administrator, request_id=interaction.id,
-                                       expected_reward=reward, expected_completion=completion_no)
+                                       expected_reward=reward, expected_completion=completion_no, submission_id=submission_id)
     return award_text(award)
 
 

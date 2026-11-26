@@ -9,7 +9,7 @@ import database as db
 MEDALS = ((10, "Sunrise Copper Medal — Third Class"),
           (30, "Sunrise Copper Medal — Second Class"),
           (50, "Sunrise Copper Medal — First Class"))
-TABLES = ("guilds", "officials", "appointments", "quests", "awards", "tribune_days")
+TABLES = ("guilds", "officials", "appointments", "quests", "awards", "tribune_days", "submissions")
 QUEST_TYPES = {
     "general": "Once per member",
     "unique": "One completion across the server",
@@ -61,6 +61,19 @@ def schema(postgres):
             UNIQUE (guild_id, id), UNIQUE (guild_id, request_id)
         );
         {_awards_table(prefix + 'awards', prefix + 'quests', identity)};
+        CREATE TABLE IF NOT EXISTS {prefix}submissions (
+            id {identity}, guild_id BIGINT NOT NULL, quest_id BIGINT NOT NULL, member_id BIGINT NOT NULL,
+            request_id BIGINT NOT NULL, deed TEXT NOT NULL, evidence TEXT, submitted_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','returned','revised','closed')),
+            reviewer_id BIGINT, reviewed_at TEXT, note TEXT, award_id BIGINT,
+            revision_of BIGINT, UNIQUE(guild_id,id), UNIQUE(guild_id,request_id), UNIQUE(guild_id,revision_of),
+            UNIQUE(guild_id,award_id), CHECK ((status='approved') = (award_id IS NOT NULL)),
+            FOREIGN KEY(guild_id,quest_id) REFERENCES {prefix}quests(guild_id,id),
+            FOREIGN KEY(guild_id,award_id) REFERENCES {prefix}awards(guild_id,id),
+            FOREIGN KEY(guild_id,revision_of) REFERENCES {prefix}submissions(guild_id,id)
+        );
+        CREATE INDEX IF NOT EXISTS acclimation_review_idx ON {prefix}submissions(guild_id,status,id);
+        CREATE INDEX IF NOT EXISTS acclimation_member_deeds_idx ON {prefix}submissions(guild_id,member_id,quest_id,id);
         CREATE TABLE IF NOT EXISTS {prefix}tribune_days (
             guild_id BIGINT NOT NULL, issuer_id BIGINT NOT NULL, day TEXT NOT NULL,
             award_id BIGINT NOT NULL,
@@ -321,6 +334,10 @@ async def quest_board(guild, member, *, page=1, query="", unrewarded=False, ques
     if quest_type is not None:
         base += " AND q.quest_type=?"
         params += (quest_type,)
+    if unrewarded:
+        base += (f" AND (q.quest_type='repeatable' OR NOT EXISTS (SELECT 1 FROM {_table('submissions')} s "
+                 "WHERE s.guild_id=q.guild_id AND s.quest_id=q.id AND s.member_id=? AND s.status='pending'))")
+        params += (member,)
     async with db.DBConnection() as conn:
         count = await conn.fetchone("SELECT COUNT(*) AS total " + base,params)
         pages = max(1,(count["total"]+QUEST_PAGE_SIZE-1)//QUEST_PAGE_SIZE)
@@ -332,10 +349,13 @@ async def quest_board(guild, member, *, page=1, query="", unrewarded=False, ques
 
 async def quest_for_reader(guild, member, quest_id):
     async with db.DBConnection() as conn:
-        return await conn.fetchone(f"SELECT q.*,o.rank AS reader_rank,a.id AS award_id,a.voided_at AS award_voided_at,a.completion_no "
+        return await conn.fetchone(f"SELECT q.*,o.rank AS reader_rank,a.id AS award_id,a.voided_at AS award_voided_at,a.completion_no,"
+                                   "s.id AS submission_id,s.status AS submission_status "
                                    f"FROM {_table('quests')} q" + _latest_award_join() +
                                    f"LEFT JOIN {_table('officials')} o ON o.guild_id=q.guild_id AND o.user_id=? "
-                                   "WHERE q.guild_id=? AND q.id=?",(member,member,guild,quest_id))
+                                   f"LEFT JOIN {_table('submissions')} s ON s.id=(SELECT MAX(h.id) FROM {_table('submissions')} h "
+                                   "WHERE h.guild_id=q.guild_id AND h.quest_id=q.id AND h.member_id=?) "
+                                   "WHERE q.guild_id=? AND q.id=?",(member,member,member,guild,quest_id))
 
 
 async def quest_deed(guild, member, quest_id, completion_no=None):
@@ -372,18 +392,43 @@ async def close_quest(guild, actor, quest_id, *, admin):
                                               (actor, utc_now().isoformat(), guild, quest_id))
         if row is None:
             raise ValueError("No open quest with that ID exists on this server.")
+        await _end_submissions(conn, guild, quest_id, "The quest was closed by staff.")
         return row
 
 
-async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request_id, expected_reward=None, expected_completion=None):
+async def _end_submissions(conn, guild, quest_id, reason, member=None):
+    await conn.execute(f"UPDATE {_table('submissions')} SET status='closed', note=COALESCE(note,?) "
+                       "WHERE guild_id=? AND quest_id=? AND status IN ('pending','returned')" +
+                       (" AND member_id=?" if member is not None else ""),
+                       (reason, guild, quest_id) + ((member,) if member is not None else ()))
+
+
+async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request_id, expected_reward=None, expected_completion=None,
+                         submission_id=None):
     deed = clean(deed, 500)
     if actor == member:
         raise ValueError("Another Hand or administrator must approve your own quest completion.")
     async with _write(guild) as conn:
         await _quest_authority(conn, guild, actor, admin)
         existing = await _replay(conn, guild, request_id, actor, member, quest_id)
+        submissions = _table("submissions")
         if existing:
+            if submission_id is not None and not await conn.fetchone(
+                    f"SELECT id FROM {submissions} WHERE guild_id=? AND id=? AND award_id=?", (guild, submission_id, existing["id"])):
+                raise ValueError("This approval request already belongs to another deed.")
             return existing
+        if submission_id is not None:
+            pending = await conn.fetchone(f"SELECT id FROM {submissions} WHERE guild_id=? AND id=? AND quest_id=? "
+                                          "AND member_id=? AND deed=? AND status='pending'", (guild, submission_id, quest_id, member, deed))
+            if not pending:
+                raise ValueError("This submission is no longer awaiting review.")
+        else:
+            # A witnessed completion can also settle the matching submitted deed.
+            matches = await conn.fetchall(f"SELECT id FROM {submissions} WHERE guild_id=? AND quest_id=? AND member_id=? "
+                                          "AND deed=? AND status='pending' ORDER BY id LIMIT 2", (guild, quest_id, member, deed))
+            if len(matches) > 1:
+                raise ValueError("Several submissions have this wording. Open Needs review to approve the intended deed.")
+            pending = matches[0] if matches else None
         quest = await conn.fetchone(f"SELECT * FROM {_table('quests')} WHERE guild_id=? AND id=? AND status='open'", (guild, quest_id))
         if not quest:
             raise ValueError("No open quest with that ID exists on this server.")
@@ -398,8 +443,14 @@ async def complete_quest(guild, actor, quest_id, member, deed, *, admin, request
             raise ValueError("Another completion was recorded for this player. Review their latest deed before awarding again.")
         now = utc_now().isoformat()
         award = await _record(conn, guild, actor, member, quest["reward"], deed, request_id, "quest", quest_id, now, number)
+        if pending:
+            await conn.execute(f"UPDATE {submissions} SET status='approved',reviewer_id=?,reviewed_at=?,award_id=? WHERE guild_id=? AND id=?",
+                               (actor, now, award["id"], guild, pending["id"]))
         if quest["quest_type"] == "unique":
             await conn.execute(f"UPDATE {_table('quests')} SET status='closed',closed_by=?,closed_at=? WHERE guild_id=? AND id=?",
                                (actor, now, guild, quest_id))
             award["closed_unique_quest"] = True
+            await _end_submissions(conn, guild, quest_id, "The unique quest was completed.")
+        elif quest["quest_type"] == "general":
+            await _end_submissions(conn, guild, quest_id, "Your completion was recorded by staff.", member)
         return award

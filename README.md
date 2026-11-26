@@ -278,7 +278,24 @@ the open list and shows its closed state if it was already selected. Menus belon
 to the reader, server and channel that opened them and expire after ten minutes
 of inactivity. Reopen the board after expiry or a bot restart.
 
-On an open quest, Hands and administrators can choose **Record completion**,
+On an open quest, choose **Submit deed** to write what you did and optionally
+paste a Discord message link from the same server. **My submissions** on the
+board shows your deeds across quests, including closed quests. A returned deed
+includes the reviewer's note and a **Revise deed** button. Repeatable quests
+accept a separate submission for each delivery, even while earlier ones await review.
+
+Hands and administrators choose **Needs review** on the board, open a deed
+and select **Approve** or **Return with a note**. Approval records the submitted
+text and awards the displayed Acclimations together. On a unique quest the
+first approval closes other pending submissions with an explanation.
+
+The pinned **Start here → Needs my attention** screen links directly to your
+weekly banner offers, deeds you can review or revise, and settlement deliveries
+you handle as staff. Administrators also see settlements with manual payments
+due. After deployment an older panel updates in place the next time someone
+uses it. Staff can also refresh it immediately with `/sunset panel`.
+
+On an open quest, Hands and administrators can also choose **Record completion**,
 select the player and write their deed. **Confirm reward** records the displayed
 amount for that player. On a unique quest the confirmation also closes the quest. Another official must approve
 their own contribution. **Close quest** asks for confirmation before ending

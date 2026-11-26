@@ -8,8 +8,10 @@ import discord
 from discord import app_commands
 
 import acclimation_store as store
+import quest_submissions as submissions
 from cogs.acclimation_display import safe
 from cogs.quest_actions import QuestScreen, TEMPORARY, UNAVAILABLE, action_card, can_manage, deed_card
+from cogs.quest_reviews import STATUS, SubmitForm, submission_screen
 
 
 log = logging.getLogger("claims-bot")
@@ -69,10 +71,18 @@ class QuestTypeSelect(discord.ui.Select):
 
 class QuestView(QuestScreen):
     def __init__(self, interaction, *, page=1, pages=1, query="", unrewarded=False, quest_id=None, rows=(),
-                 manager=False, deed_count=0, quest_type=None):
+                 manager=False, deed_count=0, quest_type=None, can_submit=False, has_submissions=False, review_count=None):
         super().__init__(interaction)
         self.page,self.query,self.unrewarded,self.quest_id = page,query,unrewarded,quest_id
         self.quest_type = quest_type
+        if not can_submit:
+            self.remove_item(self.submit)
+        if quest_id is not None and not has_submissions:
+            self.remove_item(self.mine)
+        if review_count is None:
+            self.remove_item(self.reviews)
+        elif review_count:
+            self.reviews.label = f"Needs review ({review_count})"
         if not manager:
             self.remove_item(self.complete)
             self.remove_item(self.close)
@@ -104,6 +114,19 @@ class QuestView(QuestScreen):
 
     async def open_action(self, interaction, action):
         await self.replace(interaction, partial(action_card, quest_id=self.quest_id, back=self.destination(), action=action))
+
+    @discord.ui.button(label="Submit deed", style=discord.ButtonStyle.primary, row=0)
+    async def submit(self, interaction, button):
+        if await self.interaction_check(interaction):
+            await interaction.response.send_modal(SubmitForm(self, self.quest_id, self.destination()))
+
+    @discord.ui.button(label="My submissions", row=4)
+    async def mine(self, interaction, button):
+        await self.replace(interaction, partial(submission_screen, quest_id=self.quest_id, back=self.destination()))
+
+    @discord.ui.button(label="Needs review", row=4)
+    async def reviews(self, interaction, button):
+        await self.replace(interaction, partial(submission_screen, review=True, back=self.destination()))
 
     @discord.ui.button(label="Record completion", style=discord.ButtonStyle.primary, row=0)
     async def complete(self, interaction, button):
@@ -160,11 +183,16 @@ async def render(interaction, *, page=1, query="", unrewarded=False, quest_id=No
         else:
             personal = "Not yet rewarded. A Hand or administrator must approve your completed deed."
         embed.add_field(name="Your progress",value=personal,inline=False)
+        if row["submission_status"]:
+            embed.add_field(name="Your latest submission", value=f"#{row['submission_id']} · {STATUS[row['submission_status']]}", inline=False)
         embed.add_field(name="Issued by",value=f"<@{row['created_by']}> · {row['created_at'][:10]} UTC",inline=False)
         embed.set_footer(text="Private to you · Menus expire after 10 minutes")
         return embed,QuestView(interaction,page=page,query=query,unrewarded=unrewarded,quest_id=quest_id,
                                manager=row["status"] == "open" and can_manage(interaction, row),
-                               deed_count=row["completion_no"] or 0, quest_type=quest_type)
+                               deed_count=row["completion_no"] or 0, quest_type=quest_type,
+                               has_submissions=row["submission_id"] is not None,
+                               can_submit=row["status"] == "open" and (kind == "repeatable" or
+                                   (not row["award_id"] and row["submission_status"] not in ("pending","returned"))))
     result = await store.quest_board(interaction.guild_id,interaction.user.id,page=page,query=query,
                                      unrewarded=unrewarded,quest_type=quest_type)
     lines = ["Choose a quest from the dropdown to read its requirements."]
@@ -180,8 +208,9 @@ async def render(interaction, *, page=1, query="", unrewarded=False, quest_id=No
         lines.append("No open quests match these filters." if query or unrewarded or quest_type else "No open quests right now.")
     embed = discord.Embed(title="Open quest board",description="\n\n".join(lines),colour=discord.Colour.orange())
     embed.set_footer(text=f"Page {result['page']}/{result['pages']} · {result['total']} quests · Private to you · Menus expire after 10 minutes")
+    reviews = await submissions.review_count(interaction.guild_id, interaction.user.id, admin=interaction.permissions.administrator)
     return embed,QuestView(interaction,page=result["page"],pages=result["pages"],query=result["query"],
-                          unrewarded=unrewarded,rows=result["rows"],quest_type=quest_type)
+                          unrewarded=unrewarded,rows=result["rows"],quest_type=quest_type,review_count=reviews)
 
 
 async def open_board(interaction, **target):
