@@ -36,6 +36,87 @@ def interaction(guild, user=10, admin=False, request_id=100):
 
 
 class BankContract:
+    async def test_owner_pool_checkout_confirms_price_and_posts_one_bank_receipt(self):
+        land = await self.land()
+        await db.update_reserve_blocks(self.guild, 4)
+        await db.update_leftover_blocks(self.guild, 1)
+        owner, visitor = interaction(self.guild), interaction(self.guild, user=22)
+        owner.edit_original_response = AsyncMock()
+        other = await profile_card(visitor, land_id=land["id"])
+        self.assertNotIn("Other banner purchases", [button.label for button in other["view"].children])
+        profile = await profile_card(owner, land_id=land["id"])
+        button = next(b for b in profile["view"].children if b.label == "Other banner purchases")
+        await button.callback(owner)
+        first = owner.followup.send.await_args.kwargs
+        self.assertTrue(first["ephemeral"])
+        pool = first["view"]
+        price = pool.offers["reserve"]
+        self.assertEqual(pool.offers["leftover"], 7)
+        await self.deposit(price, land_name=land["name"])
+        def current():
+            return owner.edit_original_response.await_args.kwargs
+        await pool.reserve.callback(owner)
+        await current()["view"].bank.callback(owner)
+        preview = current()
+        self.assertIn(f"{price} ems", str(preview["embed"].to_dict()))
+        self.assertIn("settlement account", str(preview["embed"].to_dict()))
+        self.assertEqual(await self.balance(land_name=land["name"]), price)
+        self.assertEqual((await self.state(land))["purchases"], 0)
+        confirm = preview["view"]
+        await confirm.confirm.callback(owner)
+        self.assertIn("Bank transfer", str(current()["embed"].to_dict()))
+        self.assertEqual(await self.balance(treasury=True), price)
+        await confirm.confirm.callback(owner)
+        self.assertEqual((await self.state(land))["purchases"], 1)
+        self.assertEqual((await db.get_reserve(self.guild))["total_blocks"], 3)
+        await button.callback(owner)
+        pool = owner.followup.send.await_args.kwargs["view"]
+        self.assertNotIn(pool.reserve, pool.children)
+        await pool.leftover.callback(owner)
+        owner.id += 1
+        await current()["view"].manual.callback(owner)
+        self.assertIn("at pickup", str(current()["embed"].to_dict()))
+        await current()["view"].confirm.callback(owner)
+        self.assertIn("Manual payment", str(current()["embed"].to_dict()))
+        self.assertEqual(await self.balance(treasury=True), price)
+        self.assertEqual((await self.state(land))["purchases"], 2)
+
+    async def test_stale_pool_checkout_requotes_and_cannot_follow_an_owner_to_another_land(self):
+        land = await self.land(chunks=2)
+        owner = interaction(self.guild)
+        owner.edit_original_response = AsyncMock()
+        await db.update_leftover_blocks(self.guild, 2)
+        async def preview():
+            profile = await profile_card(owner, land_id=land["id"], private=True)
+            button = next(b for b in profile["view"].children if b.label == "Other banner purchases")
+            await button.callback(owner)
+            pool = owner.edit_original_response.await_args.kwargs["view"]
+            owner.id += 1
+            await pool.leftover.callback(owner)
+            methods = owner.edit_original_response.await_args.kwargs["view"]
+            if not methods.price:
+                self.assertIn("Free", str(owner.edit_original_response.await_args.kwargs["embed"].to_dict()))
+                self.assertNotIn(methods.bank, methods.children)
+                self.assertNotIn(methods.manual, methods.children)
+                return methods
+            owner.id += 1
+            await methods.manual.callback(owner)
+            return owner.edit_original_response.await_args.kwargs["view"]
+        stale = await preview()
+        await bank.buy_claim(self.guild, 10, request_id=90, kind="leftover")
+        await stale.confirm.callback(owner)
+        result = owner.edit_original_response.await_args.kwargs
+        self.assertIn("price changed", result["content"])
+        self.assertEqual(result["view"].offers, {"leftover": 7})
+        self.assertEqual((await self.state(land))["purchases"], 1)
+        stale = await preview()
+        await db.update_land_owner(land["id"], 12)
+        new_land = await self.land(name="Other land")
+        await stale.confirm.callback(owner)
+        self.assertIn("owner", owner.edit_original_response.await_args.kwargs["content"])
+        self.assertEqual((await self.state(new_land))["purchases"], 0)
+        self.assertEqual((await db.get_reserve(self.guild))["leftover_blocks"], 1)
+
     async def test_saved_roster_removes_departed_officer_by_id_from_selected_land(self):
         land = await self.land()
         other = await self.land(owner=11, name="Other")

@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import acclimation_store as store
-from cogs.acclimation_display import award_text, medal, safe
+from cogs.acclimation_display import award_text, deeds_text, medal, progress, safe
 from cogs.war_share import message_payload
 from cogs.quest_browser import open_board, choices as quest_choices
 
@@ -16,14 +16,6 @@ Amount = app_commands.Range[int, 1, 1_000_000]
 RecordID = app_commands.Range[int, 1, 2**53 - 1]
 Page = app_commands.Range[int, 1, 1_000_000]
 Deed = app_commands.Range[str, 1, 500]
-
-
-def progress(total):
-    next_medal = next(((n, name) for n, name in store.MEDALS if n > total), None)
-    if next_medal is None:
-        return "All three medal thresholds reached."
-    number, name = next_medal
-    return f"{number - total:,} more for {name} ({number})."
 
 
 async def reply(interaction, text):
@@ -119,16 +111,7 @@ class AcclimationCog(GuildReplies, commands.GroupCog, name="acclimation", group_
     async def history(self, interaction: discord.Interaction, member: discord.Member = None, page: Page = 1):
         member = member or interaction.user
         rows = await store.history(interaction.guild_id, member.id, page)
-        lines = [f"**Deeds of <@{member.id}> · page {page} (2 per page)**"]
-        for row in rows:
-            quest = f" · quest #{row['quest_id']}" if row["quest_id"] is not None else ""
-            lines.append(f"**#{row['id']} · {row['amount']:,} Acclimations** · {row['created_at'][:10]} UTC · "
-                         f"<@{row['issuer_id']}> ({row['source']}){quest}\n{safe(row['deed'])}")
-            if row["voided_at"]:
-                lines.append(f"Voided {row['voided_at'][:10]} UTC by <@{row['voided_by']}>: {safe(row['void_reason'])}")
-        if not rows:
-            lines.append("No deeds on this page.")
-        await reply(interaction, "\n\n".join(lines))
+        await reply(interaction, deeds_text(member.id, page, rows))
 
     @app_commands.command(description="View the Sunrise Copper Medal eligibility board")
     async def honours(self, interaction: discord.Interaction, page: Page = 1):

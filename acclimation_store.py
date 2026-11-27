@@ -264,10 +264,10 @@ async def void_award(guild, actor, award_id, reason, *, admin):
         return row | dict(total=await _total(conn, guild, row["recipient_id"]))
 
 
-async def history(guild, member, page=1):
+async def history(guild, member, page=1, *, include_next=False):
     async with db.DBConnection() as conn:
         return await conn.fetchall(f"SELECT * FROM {_table('awards')} WHERE guild_id=? AND recipient_id=? "
-                                   "ORDER BY id DESC LIMIT 2 OFFSET ?", (guild, member, (page - 1) * 2))
+                                   "ORDER BY id DESC LIMIT ? OFFSET ?", (guild, member, 3 if include_next else 2, (page - 1) * 2))
 
 
 async def honours(guild, page=1):

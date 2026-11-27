@@ -9,7 +9,7 @@ from discord import app_commands
 
 import acclimation_store as store
 import quest_submissions as submissions
-from cogs.acclimation_display import safe
+from cogs.acclimation_display import award_amount, safe
 from cogs.quest_actions import QuestScreen, TEMPORARY, UNAVAILABLE, action_card, can_manage, deed_card
 from cogs.quest_reviews import STATUS, SubmitForm, submission_screen
 
@@ -69,6 +69,51 @@ class QuestTypeSelect(discord.ui.Select):
         await self.view.navigate(interaction, quest_type=None if selected == "all" else selected, page=1, quest_id=None)
 
 
+class CreateQuestForm(discord.ui.Modal):
+    name = discord.ui.TextInput(label="Quest title", max_length=80)
+    requirements = discord.ui.TextInput(label="Completion requirements", style=discord.TextStyle.paragraph, max_length=700)
+    reward = discord.ui.TextInput(label="Acclimations per approved deed", max_length=7)
+
+    def __init__(self, picker, kind):
+        super().__init__(title=f"Create {kind} quest", timeout=600)
+        self.picker, self.kind = picker, kind
+
+    async def on_submit(self, interaction):
+        if not await self.picker.interaction_check(interaction):
+            return
+        try:
+            amount = award_amount(self.reward.value)
+            title, details = store.clean(self.name.value, 80), store.clean(self.requirements.value, 700)
+        except ValueError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        quest_id = None
+        async def save(i):
+            nonlocal quest_id
+            quest = await store.create_quest(i.guild_id, i.user.id, title, details, amount, quest_type=self.kind,
+                                             admin=i.permissions.administrator, request_id=i.id)
+            quest_id = quest["id"]
+            return f"Quest #{quest_id} created."
+        async def result(i):
+            return await self.picker.destination(quest_id=quest_id)(i)
+        await self.picker.replace(interaction, result, commit=save)
+
+
+class CreateQuestView(QuestScreen):
+    def __init__(self, interaction, destination):
+        super().__init__(interaction)
+        self.destination = destination
+
+    @discord.ui.select(placeholder="Choose a quest type", options=[
+        discord.SelectOption(label=kind.title(), value=kind, description=rule) for kind, rule in store.QUEST_TYPES.items()])
+    async def kind(self, interaction, select):
+        if await self.interaction_check(interaction):
+            await interaction.response.send_modal(CreateQuestForm(self, select.values[0]))
+
+    @discord.ui.button(label="Back to quests")
+    async def back(self, interaction, button):
+        await self.replace(interaction, self.destination())
+
+
 class QuestView(QuestScreen):
     def __init__(self, interaction, *, page=1, pages=1, query="", unrewarded=False, quest_id=None, rows=(),
                  manager=False, deed_count=0, quest_type=None, can_submit=False, has_submissions=False, review_count=None):
@@ -81,6 +126,7 @@ class QuestView(QuestScreen):
             self.remove_item(self.mine)
         if review_count is None:
             self.remove_item(self.reviews)
+            self.remove_item(self.create)
         elif review_count:
             self.reviews.label = f"Needs review ({review_count})"
         if not manager:
@@ -127,6 +173,12 @@ class QuestView(QuestScreen):
     @discord.ui.button(label="Needs review", row=4)
     async def reviews(self, interaction, button):
         await self.replace(interaction, partial(submission_screen, review=True, back=self.destination()))
+
+    @discord.ui.button(label="Create quest", style=discord.ButtonStyle.primary, row=4)
+    async def create(self, interaction, button):
+        async def choose(i):
+            return discord.Embed(title="Create quest", description="Choose who can earn the reward and how often."), CreateQuestView(i, self.destination)
+        await self.replace(interaction, choose)
 
     @discord.ui.button(label="Record completion", style=discord.ButtonStyle.primary, row=0)
     async def complete(self, interaction, button):
